@@ -91,9 +91,7 @@ fn parse_sp_radius(v: &Value, cap: u64) -> Result<Value, String> {
     let mut m = Map::new();
     for k in KEYS {
         if let Some(x) = o.get(k) {
-            let n = x
-                .as_u64()
-                .ok_or_else(|| "radius/spacing values must be integers")?;
+            let n = x.as_u64().ok_or("radius/spacing values must be integers")?;
             if n > cap {
                 return Err(format!("value {k} out of range (0..={cap})"));
             }
@@ -153,8 +151,7 @@ fn validate_color_string(s: &str) -> Result<String, String> {
     {
         return Err("forbidden in color value".to_string());
     }
-    if t.starts_with('#') {
-        let h = &t[1..];
+    if let Some(h) = t.strip_prefix('#') {
         let ok = matches!(h.len(), 3 | 6 | 8) && h.chars().all(|c| c.is_ascii_hexdigit());
         if ok {
             return Ok(t.to_string());

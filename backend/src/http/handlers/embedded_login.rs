@@ -268,14 +268,13 @@ fn ip_limit_redis_key(state: &AppState, ip: &str) -> String {
 }
 
 fn client_ip(headers: &HeaderMap, conn: Option<SocketAddr>, trust_x_forwarded_for: bool) -> String {
-    if trust_x_forwarded_for {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = xff.split(',').next() {
-                let t = first.trim();
-                if !t.is_empty() {
-                    return t.to_string();
-                }
-            }
+    if trust_x_forwarded_for
+        && let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+        && let Some(first) = xff.split(',').next()
+    {
+        let t = first.trim();
+        if !t.is_empty() {
+            return t.to_string();
         }
     }
     conn.map(|a| a.ip().to_string())
@@ -397,10 +396,10 @@ fn cookie_csrf_token(headers: &HeaderMap) -> Option<String> {
         .and_then(|raw| {
             for part in raw.split(';') {
                 let p = part.trim();
-                if let Some(rest) = p.strip_prefix(CSRF_COOKIE) {
-                    if let Some(v) = rest.strip_prefix('=') {
-                        return Some(v.trim().to_string());
-                    }
+                if let Some(rest) = p.strip_prefix(CSRF_COOKIE)
+                    && let Some(v) = rest.strip_prefix('=')
+                {
+                    return Some(v.trim().to_string());
                 }
             }
             None
@@ -416,14 +415,14 @@ fn map_embedded_register_error(e: AppError) -> Response {
             "invalid or expired verification token",
         ),
         AppError::Database(ref err) => {
-            if let Some(db) = err.as_database_error() {
-                if db.code().as_deref() == Some("23505") {
-                    return json_err(
-                        "EMAIL_EXISTS",
-                        StatusCode::CONFLICT,
-                        "email already registered",
-                    );
-                }
+            if let Some(db) = err.as_database_error()
+                && db.code().as_deref() == Some("23505")
+            {
+                return json_err(
+                    "EMAIL_EXISTS",
+                    StatusCode::CONFLICT,
+                    "email already registered",
+                );
             }
             map_app_error(e)
         }
@@ -470,9 +469,7 @@ async fn validate_embedded_csrf_and_origin(
     consume_csrf: bool,
 ) -> Result<EmbeddedValidated, Response> {
     let ip = client_ip(headers, conn, state.config.auth.trust_x_forwarded_for);
-    if let Err(resp) = check_ip_limit(state, &ip).await {
-        return Err(resp);
-    }
+    check_ip_limit(state, &ip).await?;
 
     let client_id = client_id.trim();
     if client_id.is_empty() || csrf_body.trim().is_empty() {
@@ -2317,10 +2314,11 @@ pub async fn embedded_login_client_totp_enroll_verify(
         Err(resp) => return Ok(resp),
     };
 
-    if let Err(_) = state
+    if state
         .auth
         .jwt
         .verify_client_totp_enroll_after_email(body.enrollment_token.trim())
+        .is_err()
     {
         return Ok(json_err(
             "ENROLLMENT_TOKEN_INVALID",

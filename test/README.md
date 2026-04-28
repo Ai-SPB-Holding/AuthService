@@ -82,6 +82,16 @@ ZAP uses `host.docker.internal`; on Linux, scripts pass `--add-host=host.docker.
 
 Adjust baselines above before weakening gates in shared branches.
 
+## JWT access/refresh TTL check (Docker)
+
+From repository root (requires `.env` for compose, same as `security-up`):
+
+```bash
+sh test/scripts/run-jwt-ttl.sh
+```
+
+This uses [`test/docker/jwt-ttl.override.yml`](docker/jwt-ttl.override.yml) (optional TTL hints), migrates, applies the security probe seed, then runs [`test/scripts/check-jwt-ttl.py`](scripts/check-jwt-ttl.py). Waits are driven by the API `expires_in` and refresh JWT `exp` (server enforces minimum access **60s** and refresh **300s** for typical login). Expect on the order of **~8–9 minutes** wall time after the stack is up: access is rejected only after JWT `exp` **plus** `jsonwebtoken` default **60s leeway**, then the refresh JWT wait (min refresh TTL 300s + same leeway).
+
 ## Parallel refresh race check (optional)
 
 With the stack up and valid credentials, run:

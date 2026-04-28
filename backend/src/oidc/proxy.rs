@@ -17,6 +17,12 @@ pub struct OidcMetadata {
     pub jwks_uri: String,
 }
 
+impl Default for OidcProxy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OidcProxy {
     pub fn new() -> Self {
         Self {

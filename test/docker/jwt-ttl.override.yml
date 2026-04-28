@@ -1,0 +1,8 @@
+# Compose override for JWT TTL integration checks (see test/scripts/run-jwt-ttl.sh).
+# Values below may be raised by server clamps: access >= 60s, refresh >= 300s for
+# password login without a bound OAuth client (auth_service.rs).
+services:
+  backend:
+    environment:
+      AUTH__ACCESS_TTL_SECONDS: "3"
+      AUTH__REFRESH_TTL_SECONDS: "6"

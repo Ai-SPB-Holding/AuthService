@@ -147,21 +147,15 @@ pub async fn login(
             let mut res = Json(v).into_response();
             if payload.set_idp_session == Some(true)
                 && state.auth.jwt.idp_session_secret_configured()
+                && let Ok(c) = state.auth.jwt.verify(&p.access_token, &payload.audience)
+                && let (Ok(uid), Ok(tid)) = (Uuid::parse_str(&c.sub), Uuid::parse_str(&c.tenant_id))
+                && let Ok(sess) = state.auth.jwt.mint_idp_session(uid, tid)
+                && let Ok(h) = http::HeaderValue::from_str(&format!(
+                    "{IDP_SESSION}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600",
+                    sess
+                ))
             {
-                if let Ok(c) = state.auth.jwt.verify(&p.access_token, &payload.audience) {
-                    if let (Ok(uid), Ok(tid)) =
-                        (Uuid::parse_str(&c.sub), Uuid::parse_str(&c.tenant_id))
-                    {
-                        if let Ok(sess) = state.auth.jwt.mint_idp_session(uid, tid) {
-                            if let Ok(h) = http::HeaderValue::from_str(&format!(
-                                "{IDP_SESSION}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600",
-                                sess
-                            )) {
-                                res.headers_mut().insert(SET_COOKIE, h);
-                            }
-                        }
-                    }
-                }
+                res.headers_mut().insert(SET_COOKIE, h);
             }
             Ok(res)
         }

@@ -126,12 +126,8 @@ impl<R: UserRepository> AuthService<R> {
     ) -> (i64, i64) {
         let da = self.jwt.access_ttl_seconds();
         let dr = self.jwt.refresh_ttl_seconds();
-        let cap_a = (self.max_client_access_ttl_seconds as i64)
-            .min(86_400)
-            .max(60);
-        let cap_r = (self.max_client_refresh_ttl_seconds as i64)
-            .min(7_776_000)
-            .max(300);
+        let cap_a = (self.max_client_access_ttl_seconds as i64).clamp(60, 86_400);
+        let cap_r = (self.max_client_refresh_ttl_seconds as i64).clamp(300, 7_776_000);
         let mut ea = access_db.map(|x| x as i64).unwrap_or(da);
         let mut er = refresh_db.map(|x| x as i64).unwrap_or(dr);
         ea = ea.clamp(60, cap_a);
@@ -256,93 +252,89 @@ impl<R: UserRepository> AuthService<R> {
         }
 
         // Per-OAuth-client MFA (Authenticator) when `oauth_client_id` is set
-        if self.client_mfa_enforce {
-            if let Some(ref oc) = cmd.oauth_client_id {
-                let oc = oc.trim();
-                if !oc.is_empty() {
-                    if let Some(row) = sqlx::query(
-                        "SELECT id, mfa_policy, allow_client_totp_enrollment, client_id
+        if self.client_mfa_enforce
+            && let Some(ref oc) = cmd.oauth_client_id
+        {
+            let oc = oc.trim();
+            if !oc.is_empty() {
+                if let Some(row) = sqlx::query(
+                    "SELECT id, mfa_policy, allow_client_totp_enrollment, client_id
                          FROM clients WHERE client_id = $1 AND tenant_id = $2",
-                    )
-                    .bind(oc)
-                    .bind(cmd.tenant_id)
-                    .fetch_optional(&self._pool)
-                    .await?
-                    {
-                        let client_row_id: Uuid = row.get("id");
-                        let mfa_policy: String = row
-                            .try_get::<String, _>("mfa_policy")
-                            .unwrap_or_else(|_| "off".to_string());
-                        if mfa_policy != "off" {
-                            let is_enrolled = self
-                                .totp
-                                .is_client_totp_enabled(
-                                    found.user.id,
-                                    found.user.tenant_id,
-                                    client_row_id,
-                                )
-                                .await?;
-                            if mfa_policy == "required" && !is_enrolled {
-                                let allow_enroll: bool =
-                                    row.try_get("allow_client_totp_enrollment").unwrap_or(true);
-                                if !allow_enroll {
-                                    return Err(AppError::Validation(
+                )
+                .bind(oc)
+                .bind(cmd.tenant_id)
+                .fetch_optional(&self._pool)
+                .await?
+                {
+                    let client_row_id: Uuid = row.get("id");
+                    let mfa_policy: String = row
+                        .try_get::<String, _>("mfa_policy")
+                        .unwrap_or_else(|_| "off".to_string());
+                    if mfa_policy != "off" {
+                        let is_enrolled = self
+                            .totp
+                            .is_client_totp_enabled(
+                                found.user.id,
+                                found.user.tenant_id,
+                                client_row_id,
+                            )
+                            .await?;
+                        if mfa_policy == "required" && !is_enrolled {
+                            let allow_enroll: bool =
+                                row.try_get("allow_client_totp_enrollment").unwrap_or(true);
+                            if !allow_enroll {
+                                return Err(AppError::Validation(
                                         "2FA is required for this OAuth client; enable \"Allow users to enroll Authenticator for this client\" in client settings, or use another login method"
                                             .to_string(),
                                     ));
-                                }
-                                let (_v, email_jwt, exp) = self
-                                    .ev
-                                    .start_client_totp_enroll_email(
-                                        found.user.id,
-                                        found.user.tenant_id,
-                                        &found.user.email,
-                                        oc,
-                                    )
-                                    .await?;
-                                return Ok(LoginResult::ClientTotpEnrollEmailRequired {
-                                    client_totp_enroll_email_required: true,
-                                    email_verification_token: email_jwt,
-                                    token_type: "email_verification",
-                                    expires_in: exp,
-                                    oauth_client_id: oc.to_string(),
-                                });
                             }
-                            let use_client = (mfa_policy == "required" && is_enrolled)
-                                || (mfa_policy == "optional" && is_enrolled);
-                            if use_client {
-                                let (step, jti) = self.jwt.mint_mfa_stepup_token_ex(
+                            let (_v, email_jwt, exp) = self
+                                .ev
+                                .start_client_totp_enroll_email(
                                     found.user.id,
                                     found.user.tenant_id,
-                                    &cmd.audience,
-                                    "client",
-                                    Some(client_row_id),
-                                )?;
-                                let mfa_key = self.redis_key(&format!("mfa_su:{jti}"));
-                                let mut r = self.redis.clone();
-                                if let Err(e) = r
-                                    .set_ex::<_, _, ()>(
-                                        mfa_key,
-                                        "1",
-                                        self.jwt.mfa_stepup_ttl() as u64,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(error = %e, "mfa_su redis set");
-                                }
-                                return Ok(LoginResult::MfaRequired {
-                                    mfa_required: true,
-                                    step_up_token: step,
-                                    token_type: "mfa_step_up",
-                                    expires_in: self.jwt.mfa_stepup_ttl() as u64,
-                                });
-                            }
+                                    &found.user.email,
+                                    oc,
+                                )
+                                .await?;
+                            return Ok(LoginResult::ClientTotpEnrollEmailRequired {
+                                client_totp_enroll_email_required: true,
+                                email_verification_token: email_jwt,
+                                token_type: "email_verification",
+                                expires_in: exp,
+                                oauth_client_id: oc.to_string(),
+                            });
                         }
-                    } else {
-                        return Err(AppError::Validation(
-                            "unknown oauth_client_id for tenant".to_string(),
-                        ));
+                        let use_client =
+                            (mfa_policy == "optional" || mfa_policy == "required") && is_enrolled;
+                        if use_client {
+                            let (step, jti) = self.jwt.mint_mfa_stepup_token_ex(
+                                found.user.id,
+                                found.user.tenant_id,
+                                &cmd.audience,
+                                "client",
+                                Some(client_row_id),
+                            )?;
+                            let mfa_key = self.redis_key(&format!("mfa_su:{jti}"));
+                            let mut r = self.redis.clone();
+                            if let Err(e) = r
+                                .set_ex::<_, _, ()>(mfa_key, "1", self.jwt.mfa_stepup_ttl() as u64)
+                                .await
+                            {
+                                tracing::warn!(error = %e, "mfa_su redis set");
+                            }
+                            return Ok(LoginResult::MfaRequired {
+                                mfa_required: true,
+                                step_up_token: step,
+                                token_type: "mfa_step_up",
+                                expires_in: self.jwt.mfa_stepup_ttl() as u64,
+                            });
+                        }
                     }
+                } else {
+                    return Err(AppError::Validation(
+                        "unknown oauth_client_id for tenant".to_string(),
+                    ));
                 }
             }
         }
@@ -903,6 +895,7 @@ impl<R: UserRepository> AuthService<R> {
     }
 
     /// Standard token pair (new refresh family).
+    #[allow(clippy::too_many_arguments)]
     async fn issue_tokens(
         &self,
         user_id: Uuid,
@@ -931,6 +924,7 @@ impl<R: UserRepository> AuthService<R> {
 
     /// Issue access + refresh; `family_id` is stable across rotations; `rotated_from` for audit.
     /// `ttl_precomputed`: from [`Self::effective_oauth_token_ttls`] or authorization-code path to avoid an extra query.
+    #[allow(clippy::too_many_arguments)]
     async fn issue_tokens_with_family(
         &self,
         user_id: Uuid,
@@ -1280,10 +1274,10 @@ impl<R: UserRepository> AuthService<R> {
         match ins_user {
             Ok(_) => {}
             Err(e) => {
-                if let sqlx::Error::Database(ref db) = e {
-                    if db.code().as_deref() == Some("23505") {
-                        return Err(AppError::Validation("email already registered".to_string()));
-                    }
+                if let sqlx::Error::Database(ref db) = e
+                    && db.code().as_deref() == Some("23505")
+                {
+                    return Err(AppError::Validation("email already registered".to_string()));
                 }
                 return Err(AppError::Internal(e.to_string()));
             }
@@ -1359,6 +1353,7 @@ impl<R: UserRepository> AuthService<R> {
     }
 
     /// Insert a one-time authorization code (OIDC authorization code + PKCE).
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_authorization_code(
         &self,
         user_id: Uuid,
@@ -1407,6 +1402,7 @@ impl<R: UserRepository> AuthService<R> {
     }
 
     /// Exchanges an authorization code for tokens (access, refresh, optional id_token for `openid`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn exchange_authorization_code(
         &self,
         code: &str,

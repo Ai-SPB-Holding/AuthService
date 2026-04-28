@@ -88,12 +88,12 @@ fn upsert_env_line(content: &str, key: &str, value: &str) -> String {
             out_lines.push(line.to_string());
             continue;
         }
-        if let Some((raw_k, _)) = t.split_once('=') {
-            if raw_k.trim() == key {
-                out_lines.push(new_line.clone());
-                seen = true;
-                continue;
-            }
+        if let Some((raw_k, _)) = t.split_once('=')
+            && raw_k.trim() == key
+        {
+            out_lines.push(new_line.clone());
+            seen = true;
+            continue;
         }
         out_lines.push(line.to_string());
     }
@@ -339,38 +339,38 @@ pub async fn apply_settings_update(
         content = upsert_env_line(&content, "SERVER__ISSUER", s);
         changed_keys.push("SERVER__ISSUER");
     }
-    if let Some(ref v) = update.private_key_pem {
-        if !v.trim().is_empty() {
-            validate_pem_private(v.trim())?;
-            content = upsert_env_line(&content, "AUTH__JWT_PRIVATE_KEY_PEM", v.trim());
-            changed_keys.push("AUTH__JWT_PRIVATE_KEY_PEM");
-        }
+    if let Some(ref v) = update.private_key_pem
+        && !v.trim().is_empty()
+    {
+        validate_pem_private(v.trim())?;
+        content = upsert_env_line(&content, "AUTH__JWT_PRIVATE_KEY_PEM", v.trim());
+        changed_keys.push("AUTH__JWT_PRIVATE_KEY_PEM");
     }
-    if let Some(ref v) = update.public_key_pem {
-        if !v.trim().is_empty() {
-            validate_pem_public(v.trim())?;
-            content = upsert_env_line(&content, "AUTH__JWT_PUBLIC_KEY_PEM", v.trim());
-            changed_keys.push("AUTH__JWT_PUBLIC_KEY_PEM");
-        }
+    if let Some(ref v) = update.public_key_pem
+        && !v.trim().is_empty()
+    {
+        validate_pem_public(v.trim())?;
+        content = upsert_env_line(&content, "AUTH__JWT_PUBLIC_KEY_PEM", v.trim());
+        changed_keys.push("AUTH__JWT_PUBLIC_KEY_PEM");
     }
-    if let Some(ref v) = update.cookie_secret {
-        if !v.trim().is_empty() {
-            if v.trim().len() < 32 {
-                return Err(AppError::Validation(
-                    "AUTH__COOKIE_SECRET must be at least 32 characters (matches HS256 idp_session requirement)"
-                        .to_string(),
-                ));
-            }
-            content = upsert_env_line(&content, "AUTH__COOKIE_SECRET", v.trim());
-            changed_keys.push("AUTH__COOKIE_SECRET");
+    if let Some(ref v) = update.cookie_secret
+        && !v.trim().is_empty()
+    {
+        if v.trim().len() < 32 {
+            return Err(AppError::Validation(
+                "AUTH__COOKIE_SECRET must be at least 32 characters (matches HS256 idp_session requirement)"
+                    .to_string(),
+            ));
         }
+        content = upsert_env_line(&content, "AUTH__COOKIE_SECRET", v.trim());
+        changed_keys.push("AUTH__COOKIE_SECRET");
     }
-    if let Some(ref v) = update.totp_encryption_key_b64 {
-        if !v.trim().is_empty() {
-            validate_totp_key_b64(v.trim())?;
-            content = upsert_env_line(&content, "TOTP__ENCRYPTION_KEY_B64", v.trim());
-            changed_keys.push("TOTP__ENCRYPTION_KEY_B64");
-        }
+    if let Some(ref v) = update.totp_encryption_key_b64
+        && !v.trim().is_empty()
+    {
+        validate_totp_key_b64(v.trim())?;
+        content = upsert_env_line(&content, "TOTP__ENCRYPTION_KEY_B64", v.trim());
+        changed_keys.push("TOTP__ENCRYPTION_KEY_B64");
     }
 
     if changed_keys.is_empty() {

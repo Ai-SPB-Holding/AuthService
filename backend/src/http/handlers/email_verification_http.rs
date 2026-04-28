@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::services::app_state::AppState;
 use crate::services::errors::AppError;
 
-fn bearer<'a>(headers: &'a axum::http::HeaderMap) -> Option<&'a str> {
+fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
     let h = headers.get(AUTHORIZATION)?.to_str().ok()?;
     h.strip_prefix("Bearer ").map(str::trim)
 }

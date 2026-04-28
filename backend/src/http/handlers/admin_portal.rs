@@ -288,7 +288,7 @@ pub async fn list_audit_logs(
         .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
     let global =
         crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
-    let limit = q.limit.unwrap_or(100).min(500).max(1);
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
 
     let mut items: Vec<AuditListItem> = Vec::new();
 
@@ -372,7 +372,7 @@ pub async fn list_audit_logs(
         Err(e) => return Err(e.into()),
     }
 
-    items.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at));
+    items.sort_by_key(|b| std::cmp::Reverse(b.occurred_at));
     items.truncate(limit as usize);
     Ok(Json(items))
 }

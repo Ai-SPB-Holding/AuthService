@@ -461,7 +461,7 @@ impl EmailVerificationService {
             .jwt
             .mint_email_verification_token(user_id, tenant_id, ver_id)?;
         let expires_in = self.config.totp.email_verification_jwt_ttl_seconds;
-        Ok((ver_id, jwt, expires_in as u64))
+        Ok((ver_id, jwt, expires_in))
     }
 
     pub async fn resend_client_totp_enroll_email(
@@ -495,7 +495,7 @@ impl EmailVerificationService {
             .jwt
             .mint_email_verification_token(user_id, tenant_id, ver_id)?;
         let expires_in = self.config.totp.email_verification_jwt_ttl_seconds;
-        Ok((jwt, expires_in as u64))
+        Ok((jwt, expires_in))
     }
 
     /// Verify 6-digit code; does not set `email_verified` (user is already an account). Clears `cte:bind` Redis key.

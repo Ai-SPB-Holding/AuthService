@@ -120,14 +120,14 @@ impl AppState {
                 return Ok(());
             }
         };
-        if n == 1 {
-            if let Err(e) = r.expire::<_, ()>(&key, window_secs.max(1) as i64).await {
-                tracing::warn!(error = %e, "rate_limit redis expire");
-                if fail_closed {
-                    return Err(crate::services::errors::AppError::Internal(
-                        "oauth rate limit store unavailable".to_string(),
-                    ));
-                }
+        if n == 1
+            && let Err(e) = r.expire::<_, ()>(&key, window_secs.max(1) as i64).await
+        {
+            tracing::warn!(error = %e, "rate_limit redis expire");
+            if fail_closed {
+                return Err(crate::services::errors::AppError::Internal(
+                    "oauth rate limit store unavailable".to_string(),
+                ));
             }
         }
         if n > i64::from(max_attempts) {

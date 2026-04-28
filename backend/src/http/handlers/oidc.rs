@@ -190,17 +190,17 @@ pub async fn authorize(
         ));
     }
 
-    if let Some(login) = &state.config.oidc.login_url {
-        if jar.get(IDP_SESSION_COOKIE).is_none() {
-            let current = build_authorize_url(&state, &q);
-            let to = format!(
-                "{}{}return_to={}",
-                login,
-                if login.contains('?') { "&" } else { "?" },
-                urlencoding::encode(&current)
-            );
-            return Ok(Redirect::temporary(&to).into_response());
-        }
+    if let Some(login) = &state.config.oidc.login_url
+        && jar.get(IDP_SESSION_COOKIE).is_none()
+    {
+        let current = build_authorize_url(&state, &q);
+        let to = format!(
+            "{}{}return_to={}",
+            login,
+            if login.contains('?') { "&" } else { "?" },
+            urlencoding::encode(&current)
+        );
+        return Ok(Redirect::temporary(&to).into_response());
     }
 
     let c = jar.get(IDP_SESSION_COOKIE).ok_or(AppError::Unauthorized)?;

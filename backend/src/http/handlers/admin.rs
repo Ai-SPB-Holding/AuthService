@@ -352,28 +352,28 @@ fn validate_client_oauth_token_ttl(
     max_access_cap: u64,
     max_refresh_cap: u64,
 ) -> Result<(), AppError> {
-    let max_a = (max_access_cap as i64).min(86_400).max(60);
-    let max_r = (max_refresh_cap as i64).min(7_776_000).max(300);
-    if let Some(a) = access {
-        if a < 60 || i64::from(a) > max_a {
-            return Err(AppError::Validation(format!(
-                "access_ttl_seconds must be between 60 and {max_a} (inclusive, operator cap)"
-            )));
-        }
+    let max_a = (max_access_cap as i64).clamp(60, 86_400);
+    let max_r = (max_refresh_cap as i64).clamp(300, 7_776_000);
+    if let Some(a) = access
+        && (a < 60 || i64::from(a) > max_a)
+    {
+        return Err(AppError::Validation(format!(
+            "access_ttl_seconds must be between 60 and {max_a} (inclusive, operator cap)"
+        )));
     }
-    if let Some(r) = refresh {
-        if r < 300 || i64::from(r) > max_r {
-            return Err(AppError::Validation(format!(
-                "refresh_ttl_seconds must be between 300 and {max_r} (inclusive, operator cap)"
-            )));
-        }
+    if let Some(r) = refresh
+        && (r < 300 || i64::from(r) > max_r)
+    {
+        return Err(AppError::Validation(format!(
+            "refresh_ttl_seconds must be between 300 and {max_r} (inclusive, operator cap)"
+        )));
     }
-    if let (Some(a), Some(r)) = (access, refresh) {
-        if r < a {
-            return Err(AppError::Validation(
-                "refresh_ttl_seconds must be >= access_ttl_seconds".to_string(),
-            ));
-        }
+    if let (Some(a), Some(r)) = (access, refresh)
+        && r < a
+    {
+        return Err(AppError::Validation(
+            "refresh_ttl_seconds must be >= access_ttl_seconds".to_string(),
+        ));
     }
     Ok(())
 }

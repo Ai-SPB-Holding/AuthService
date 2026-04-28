@@ -188,7 +188,7 @@ pub fn authorize_pkce_ok(
     if !need_pkce {
         return Ok(());
     }
-    if code_challenge_method.as_deref() != Some("S256") {
+    if code_challenge_method != Some("S256") {
         return Err(AppError::Validation(
             "pkce S256 is required for this client".to_string(),
         ));

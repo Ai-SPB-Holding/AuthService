@@ -47,13 +47,13 @@ pub async fn security_response_headers(
     }
 
     let corp = state.config.server.cross_origin_resource_policy.trim();
-    if !corp.is_empty() {
-        if let Ok(val) = HeaderValue::from_str(corp) {
-            let _ = headers.insert(
-                header::HeaderName::from_static("cross-origin-resource-policy"),
-                val,
-            );
-        }
+    if !corp.is_empty()
+        && let Ok(val) = HeaderValue::from_str(corp)
+    {
+        let _ = headers.insert(
+            header::HeaderName::from_static("cross-origin-resource-policy"),
+            val,
+        );
     }
 
     if path_needs_no_store(&path) {

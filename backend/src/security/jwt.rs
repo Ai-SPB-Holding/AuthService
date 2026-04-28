@@ -306,6 +306,7 @@ impl JwtService {
         self.hmac_key.is_some()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_access_token(
         &self,
         user_id: Uuid,
@@ -332,6 +333,7 @@ impl JwtService {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mint_access_token_with_jti(
         &self,
         user_id: Uuid,
@@ -370,6 +372,7 @@ impl JwtService {
             .map_err(|e| AppError::Internal(format!("failed to sign access token: {e}")))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_refresh_token(
         &self,
         user_id: Uuid,
@@ -403,6 +406,7 @@ impl JwtService {
             .map_err(|e| AppError::Internal(format!("failed to sign refresh token: {e}")))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_id_token(
         &self,
         user_id: Uuid,
