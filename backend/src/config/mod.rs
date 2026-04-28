@@ -28,6 +28,12 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_issuer")]
     pub issuer: String,
+    /// `Cross-Origin-Resource-Policy` header value (e.g. `cross-origin`, `same-origin`). Empty = omit header.
+    #[serde(default = "default_cross_origin_resource_policy")]
+    pub cross_origin_resource_policy: String,
+    /// When true, send `X-Frame-Options: DENY` on all responses (typical for JSON APIs).
+    #[serde(default = "default_true")]
+    pub x_frame_options_deny: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -40,6 +46,30 @@ pub struct DatabaseConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RedisConfig {
     pub url: String,
+    #[serde(default = "default_redis_prefix")]
+    pub prefix: String,
+}
+
+impl RedisConfig {
+    /// Prefix a raw redis key with `REDIS__PREFIX` (if set).
+    ///
+    /// Behavior:
+    /// - empty prefix => returns `raw` unchanged
+    /// - ensures prefix ends with `:`
+    /// - strips leading `:` from `raw` to avoid `::`
+    pub fn key(&self, raw: &str) -> String {
+        let raw = raw.trim();
+        let p = self.prefix.trim();
+        if p.is_empty() {
+            return raw.to_string();
+        }
+        let mut pref = p.to_string();
+        if !pref.ends_with(':') {
+            pref.push(':');
+        }
+        let raw = raw.trim_start_matches(':');
+        format!("{pref}{raw}")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -56,6 +86,12 @@ pub struct AuthConfig {
     pub access_ttl_seconds: u64,
     #[serde(default = "default_refresh_ttl")]
     pub refresh_ttl_seconds: u64,
+    /// Upper bound for per-client `clients.access_ttl_seconds` (operator cap; DB allows up to 86400).
+    #[serde(default = "default_max_client_access_ttl_cap")]
+    pub max_client_access_ttl_seconds: u64,
+    /// Upper bound for per-client `clients.refresh_ttl_seconds` (operator cap; DB allows up to 7776000).
+    #[serde(default = "default_max_client_refresh_ttl_cap")]
+    pub max_client_refresh_ttl_seconds: u64,
     pub cookie_secret: Option<String>,
     /// `aud` value required for admin API tokens (`/admin/*`).
     #[serde(default = "default_admin_api_audience")]
@@ -70,6 +106,10 @@ pub struct AuthConfig {
     /// and aggregate metrics (auth-service deployment operator), not only `tenant_id` from the JWT.
     #[serde(default)]
     pub global_admin_user_ids: String,
+    /// One-time bootstrap token: allows creating the very first admin when there are zero users.
+    /// Used by `POST /bootstrap/admin` (must be disabled/removed after bootstrap).
+    #[serde(default)]
+    pub bootstrap_admin_token: Option<String>,
     /// Second allowlist, same meaning as [AUTH__GLOBAL_ADMIN_USER_IDS] — `AUTH__AUTH_SERVICE_DEPLOYMENT_ADMINS`.
     #[serde(default)]
     pub auth_service_deployment_admins: String,
@@ -85,6 +125,11 @@ pub struct AuthConfig {
     /// Window seconds for [`AuthConfig::embedded_login_ip_max_attempts`].
     #[serde(default = "default_embedded_ip_window_secs")]
     pub embedded_login_ip_window_seconds: u64,
+    /// When `false` (default), embedded `/api/*` IP rate limits use the TCP client address only.
+    /// Set `true` only behind a reverse proxy that **replaces** client `X-Forwarded-For` with the real hop
+    /// (never forward untrusted XFF from browsers directly to this service).
+    #[serde(default)]
+    pub trust_x_forwarded_for: bool,
     /// When `true`, allows deprecated OAuth2 resource-owner password grant on `POST /token`.
     #[serde(default)]
     pub allow_resource_owner_password_grant: bool,
@@ -116,6 +161,10 @@ pub struct OidcConfig {
     /// When `true` (default), enforces per-client `mfa_policy` on password login, `/token` password grant, and `GET /authorize`.
     #[serde(default = "default_true")]
     pub client_mfa_enforce: bool,
+    /// When `OIDC__SERVER_METADATA_URL` is set but the upstream fetch fails, serve the built-in discovery document instead of 502.
+    /// Use only if you accept masking misconfiguration; default false.
+    #[serde(default)]
+    pub metadata_proxy_fallback: bool,
 }
 
 /// CORS: comma-separated origins, e.g. `http://localhost:5173,https://app.example.com`. Empty = no browser CORS.
@@ -279,6 +328,10 @@ fn default_db_pool() -> u32 {
     20
 }
 
+fn default_redis_prefix() -> String {
+    String::new()
+}
+
 fn default_access_ttl() -> u64 {
     900
 }
@@ -287,8 +340,20 @@ fn default_refresh_ttl() -> u64 {
     60 * 60 * 24 * 14
 }
 
+fn default_max_client_access_ttl_cap() -> u64 {
+    86400
+}
+
+fn default_max_client_refresh_ttl_cap() -> u64 {
+    7776000
+}
+
 fn default_issuer() -> String {
     "https://auth.local".to_string()
+}
+
+fn default_cross_origin_resource_policy() -> String {
+    "cross-origin".to_string()
 }
 
 fn default_email_from() -> String {

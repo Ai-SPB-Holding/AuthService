@@ -1,0 +1,27 @@
+# Gitleaks allowlist / tuning for AuthService security harness.
+# Docs: https://github.com/gitleaks/gitleaks/blob/master/README.md#configuration
+
+title = "AuthService gitleaks"
+
+[extend]
+# Built-in ruleset; override allowlists below.
+useDefault = true
+
+[allowlist]
+description = "Global allowlist (paths / regex). Prefer narrow regex over broad paths."
+paths = [
+  '''\.lock$''',
+  '''package-lock\.json$''',
+  '''Cargo\.lock$''',
+  '''node_modules/''',
+  '''\.cursor/''',
+  '''test/reports/''',
+  # UI copy: PEM-shaped placeholders (not real keys)
+  '''dashboard-ui/src/pages/settings/settings-page\.tsx$''',
+  # Documented demo secrets (copy to real .env locally; not committed real env)
+  '''examples/.+\.env[^/]*\.example$''',
+]
+regexes = [
+  '''example\.com''',
+  '''changeme''',
+]

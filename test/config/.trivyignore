@@ -1,0 +1,7 @@
+# One CVE ID per line. Remove when Debian bookworm-security ships a fix and Trivy clears.
+# Triaged 2026-04-28: backend image is debian:bookworm-slim; Trivy reports no FixedVersion in stable.
+CVE-2026-0861
+CVE-2026-41989
+CVE-2026-29111
+CVE-2025-69720
+CVE-2023-45853

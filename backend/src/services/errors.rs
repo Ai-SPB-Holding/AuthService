@@ -1,4 +1,8 @@
-use axum::{Json, http::StatusCode, response::{IntoResponse, Response}};
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde_json::json;
 use thiserror::Error;
 
@@ -23,6 +27,9 @@ pub enum AppError {
     Validation(String),
     #[error("too many requests")]
     TooManyRequests,
+    /// OIDC discovery document could not be loaded from the configured upstream (operator misconfiguration).
+    #[error("oidc discovery unavailable")]
+    OidcDiscoveryUnavailable,
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -35,18 +42,34 @@ impl IntoResponse for AppError {
             Self::ForbiddenWithReason(s) => (StatusCode::FORBIDDEN, s.clone()),
             Self::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             Self::Validation(v) => (StatusCode::BAD_REQUEST, v.clone()),
-            Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too many requests".to_string()),
+            Self::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many requests".to_string(),
+            ),
+            Self::OidcDiscoveryUnavailable => (
+                StatusCode::BAD_GATEWAY,
+                "oidc discovery unavailable".to_string(),
+            ),
             Self::Database(e) => {
                 tracing::error!(error = %e, "database");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_string(),
+                )
             }
             Self::Redis(e) => {
                 tracing::error!(error = %e, "redis");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_string(),
+                )
             }
             Self::Config(v) | Self::Internal(v) => {
                 tracing::error!(error = %v, "internal");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_string(),
+                )
             }
         };
 

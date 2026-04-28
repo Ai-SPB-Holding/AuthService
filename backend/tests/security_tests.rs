@@ -2,6 +2,15 @@ use auth_service::security::crypto::TotpEncryption;
 use auth_service::security::password::{hash_password, verify_password};
 use auth_service::security::totp_impl::{build_totp, check_totp, generate_totp_secret};
 
+/// Must match `test/sql/security_escalation_seed.sql` (security-all harness).
+#[test]
+fn security_escalation_seed_password_verifies() {
+    assert!(verify_password(
+        "EscalationProbe2026!Secure",
+        "$argon2id$v=19$m=19456,t=2,p=1$jOZW1+L0FdXdHy7VtVMoPQ$aWGXncHsDmXH8aaIkuEIyV+oYu9/JcXSZJ5SKddd54w"
+    ));
+}
+
 #[test]
 fn rejects_invalid_password_hash() {
     assert!(!verify_password("secret", "invalid"));

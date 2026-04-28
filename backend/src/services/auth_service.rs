@@ -90,6 +90,7 @@ pub struct AuthService<R: UserRepository> {
     pub users: Arc<R>,
     pub jwt: JwtService,
     pub redis: redis::aio::ConnectionManager,
+    pub redis_prefix: String,
     pub _pool: PgPool,
     pub ev: Arc<EmailVerificationService>,
     pub totp: Arc<TotpService>,
@@ -97,9 +98,81 @@ pub struct AuthService<R: UserRepository> {
     pub client_mfa_enforce: bool,
     /// From `AUTH__REQUIRE_LOGIN_2FA` (default false).
     pub require_login_2fa: bool,
+    /// Cap for per-client `access_ttl_seconds` (`AUTH__MAX_CLIENT_ACCESS_TTL_SECONDS`).
+    pub max_client_access_ttl_seconds: u64,
+    /// Cap for per-client `refresh_ttl_seconds` (`AUTH__MAX_CLIENT_REFRESH_TTL_SECONDS`).
+    pub max_client_refresh_ttl_seconds: u64,
 }
 
 impl<R: UserRepository> AuthService<R> {
+    fn redis_key(&self, raw: &str) -> String {
+        let p = self.redis_prefix.trim();
+        if p.is_empty() {
+            return raw.trim().to_string();
+        }
+        let mut pref = p.to_string();
+        if !pref.ends_with(':') {
+            pref.push(':');
+        }
+        let raw = raw.trim().trim_start_matches(':');
+        format!("{pref}{raw}")
+    }
+
+    /// Combine DB overrides with JWT defaults and operator caps (`AUTH__MAX_CLIENT_*`).
+    pub fn resolve_effective_token_ttls_from_db_columns(
+        &self,
+        access_db: Option<i32>,
+        refresh_db: Option<i32>,
+    ) -> (i64, i64) {
+        let da = self.jwt.access_ttl_seconds();
+        let dr = self.jwt.refresh_ttl_seconds();
+        let cap_a = (self.max_client_access_ttl_seconds as i64)
+            .min(86_400)
+            .max(60);
+        let cap_r = (self.max_client_refresh_ttl_seconds as i64)
+            .min(7_776_000)
+            .max(300);
+        let mut ea = access_db.map(|x| x as i64).unwrap_or(da);
+        let mut er = refresh_db.map(|x| x as i64).unwrap_or(dr);
+        ea = ea.clamp(60, cap_a);
+        er = er.clamp(300, cap_r);
+        if er < ea {
+            er = ea;
+        }
+        (ea, er)
+    }
+
+    /// Per-OAuth-client JWT lifetimes; third value is `clients.id` when the client row exists.
+    pub async fn effective_oauth_token_ttls(
+        &self,
+        tenant_id: Uuid,
+        oauth_client_public_id: Option<&str>,
+    ) -> Result<(i64, i64, Option<Uuid>), AppError> {
+        let Some(pid) = oauth_client_public_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            let (a, r) = self.resolve_effective_token_ttls_from_db_columns(None, None);
+            return Ok((a, r, None));
+        };
+        let row = sqlx::query(
+            "SELECT id, access_ttl_seconds, refresh_ttl_seconds FROM clients WHERE tenant_id = $1 AND client_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(pid)
+        .fetch_optional(&self._pool)
+        .await?;
+        let Some(row) = row else {
+            let (a, r) = self.resolve_effective_token_ttls_from_db_columns(None, None);
+            return Ok((a, r, None));
+        };
+        let row_id: Uuid = row.get("id");
+        let a: Option<i32> = row.try_get("access_ttl_seconds").ok().flatten();
+        let b: Option<i32> = row.try_get("refresh_ttl_seconds").ok().flatten();
+        let (ea, er) = self.resolve_effective_token_ttls_from_db_columns(a, b);
+        Ok((ea, er, Some(row_id)))
+    }
+
     pub async fn register(&self, cmd: RegisterCommand) -> Result<RegisterPendingEmail, AppError> {
         if cmd.password.len() < 10 {
             return Err(AppError::Validation("password is too short".to_string()));
@@ -107,8 +180,11 @@ impl<R: UserRepository> AuthService<R> {
 
         let email = cmd.email.trim().to_lowercase();
         let hash = password::hash_password(&cmd.password).map_err(AppError::Validation)?;
-        let reg = parse_registration_source(cmd.registration_source.as_deref(), registration_source::DEFAULT_DIRECT)
-            .map_err(AppError::Validation)?;
+        let reg = parse_registration_source(
+            cmd.registration_source.as_deref(),
+            registration_source::DEFAULT_DIRECT,
+        )
+        .map_err(AppError::Validation)?;
         let user = self
             .users
             .create_user(cmd.tenant_id, &email, &hash, &reg)
@@ -128,7 +204,10 @@ impl<R: UserRepository> AuthService<R> {
     pub async fn login(&self, cmd: LoginCommand) -> Result<LoginResult, AppError> {
         let email = cmd.email.trim().to_lowercase();
         self.rate_limit_login(cmd.tenant_id, &email).await?;
-        let found = self.users.find_with_credential(cmd.tenant_id, &email).await?;
+        let found = self
+            .users
+            .find_with_credential(cmd.tenant_id, &email)
+            .await?;
         let found = match found {
             Some(v) => v,
             None => {
@@ -154,15 +233,15 @@ impl<R: UserRepository> AuthService<R> {
         self.clear_failed_logins(cmd.tenant_id, &email).await?;
 
         if self.require_login_2fa && !found.totp_enabled {
-            let roles = self.load_role_names(found.user.tenant_id, found.user.id).await?;
+            let roles = self
+                .load_role_names(found.user.tenant_id, found.user.id)
+                .await?;
             if roles.iter().any(|r| r == "admin") {
-                let (enrollment_token, _jti) = self
-                    .jwt
-                    .mint_totp_enrollment_token(
-                        found.user.id,
-                        found.user.tenant_id,
-                        &cmd.audience,
-                    )?;
+                let (enrollment_token, _jti) = self.jwt.mint_totp_enrollment_token(
+                    found.user.id,
+                    found.user.tenant_id,
+                    &cmd.audience,
+                )?;
                 return Ok(LoginResult::TotpEnrollmentRequired {
                     totp_enrollment_required: true,
                     enrollment_token,
@@ -197,12 +276,15 @@ impl<R: UserRepository> AuthService<R> {
                         if mfa_policy != "off" {
                             let is_enrolled = self
                                 .totp
-                                .is_client_totp_enabled(found.user.id, found.user.tenant_id, client_row_id)
+                                .is_client_totp_enabled(
+                                    found.user.id,
+                                    found.user.tenant_id,
+                                    client_row_id,
+                                )
                                 .await?;
                             if mfa_policy == "required" && !is_enrolled {
-                                let allow_enroll: bool = row
-                                    .try_get("allow_client_totp_enrollment")
-                                    .unwrap_or(true);
+                                let allow_enroll: bool =
+                                    row.try_get("allow_client_totp_enrollment").unwrap_or(true);
                                 if !allow_enroll {
                                     return Err(AppError::Validation(
                                         "2FA is required for this OAuth client; enable \"Allow users to enroll Authenticator for this client\" in client settings, or use another login method"
@@ -236,10 +318,14 @@ impl<R: UserRepository> AuthService<R> {
                                     "client",
                                     Some(client_row_id),
                                 )?;
-                                let mfa_key = format!("mfa_su:{jti}");
+                                let mfa_key = self.redis_key(&format!("mfa_su:{jti}"));
                                 let mut r = self.redis.clone();
                                 if let Err(e) = r
-                                    .set_ex::<_, _, ()>(mfa_key, "1", self.jwt.mfa_stepup_ttl() as u64)
+                                    .set_ex::<_, _, ()>(
+                                        mfa_key,
+                                        "1",
+                                        self.jwt.mfa_stepup_ttl() as u64,
+                                    )
                                     .await
                                 {
                                     tracing::warn!(error = %e, "mfa_su redis set");
@@ -253,7 +339,9 @@ impl<R: UserRepository> AuthService<R> {
                             }
                         }
                     } else {
-                        return Err(AppError::Validation("unknown oauth_client_id for tenant".to_string()));
+                        return Err(AppError::Validation(
+                            "unknown oauth_client_id for tenant".to_string(),
+                        ));
                     }
                 }
             }
@@ -264,10 +352,12 @@ impl<R: UserRepository> AuthService<R> {
                 tracing::error!(user_id = %found.user.id, "totp_enabled but no secret");
                 return Err(AppError::Internal("totp misconfigured".to_string()));
             }
-            let (step, jti) = self
-                .jwt
-                .mint_mfa_stepup_token(found.user.id, found.user.tenant_id, &cmd.audience)?;
-            let mfa_key = format!("mfa_su:{jti}");
+            let (step, jti) = self.jwt.mint_mfa_stepup_token(
+                found.user.id,
+                found.user.tenant_id,
+                &cmd.audience,
+            )?;
+            let mfa_key = self.redis_key(&format!("mfa_su:{jti}"));
             let mut r = self.redis.clone();
             if let Err(e) = r
                 .set_ex::<_, _, ()>(mfa_key, "1", self.jwt.mfa_stepup_ttl() as u64)
@@ -283,7 +373,9 @@ impl<R: UserRepository> AuthService<R> {
             });
         }
 
-        let roles = self.load_role_names(found.user.tenant_id, found.user.id).await?;
+        let roles = self
+            .load_role_names(found.user.tenant_id, found.user.id)
+            .await?;
         let permissions = self
             .load_permission_names(found.user.tenant_id, found.user.id)
             .await
@@ -304,27 +396,28 @@ impl<R: UserRepository> AuthService<R> {
                 oauth_binding,
             )
             .await?;
-        self.record_auth_event(found.user.tenant_id, Some(found.user.id), true, "password_login")
-            .await;
+        self.record_auth_event(
+            found.user.tenant_id,
+            Some(found.user.id),
+            true,
+            "password_login",
+        )
+        .await;
         Ok(LoginResult::Tokens(pair))
     }
 
     /// Complete TOTP after password step (`step_up_token` from [`LoginResult::MfaRequired`]).
     pub async fn login_mfa(&self, step_up_token: &str, code: &str) -> Result<TokenPair, AppError> {
         let c = self.jwt.verify_mfa_stepup(step_up_token)?;
-        let mfa_key = format!("mfa_su:{}", c.jti);
+        let mfa_key = self.redis_key(&format!("mfa_su:{}", c.jti));
         let mut r = self.redis.clone();
-        let key_ok: bool = r
-            .exists(mfa_key.clone())
+        let consumed: Option<String> = r
+            .get_del(mfa_key)
             .await
             .map_err(|_| AppError::Unauthorized)?;
-        if !key_ok {
+        if consumed.is_none() {
             return Err(AppError::Unauthorized);
         }
-        let _: () = r
-            .del::<_, ()>(mfa_key)
-            .await
-            .map_err(|_| AppError::Unauthorized)?;
         let user_id = Uuid::parse_str(&c.sub).map_err(|_| AppError::Unauthorized)?;
         let tenant_id = Uuid::parse_str(&c.tenant_id).map_err(|_| AppError::Unauthorized)?;
         let oauth_client_for_refresh = if c.mfa_ctx == "client" {
@@ -333,18 +426,22 @@ impl<R: UserRepository> AuthService<R> {
                 .as_ref()
                 .and_then(|s| Uuid::parse_str(s).ok())
                 .ok_or(AppError::Unauthorized)?;
-            let pub_cid: String = sqlx::query_scalar("SELECT client_id::text FROM clients WHERE id = $1 AND tenant_id = $2")
-                .bind(row_id)
-                .bind(tenant_id)
-                .fetch_optional(&self._pool)
-                .await?
-                .ok_or(AppError::Unauthorized)?;
+            let pub_cid: String = sqlx::query_scalar(
+                "SELECT client_id::text FROM clients WHERE id = $1 AND tenant_id = $2",
+            )
+            .bind(row_id)
+            .bind(tenant_id)
+            .fetch_optional(&self._pool)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
             self.totp
                 .verify_client_login_totp(user_id, tenant_id, row_id, &pub_cid, code)
                 .await?;
             Some(pub_cid)
         } else {
-            self.totp.verify_login_totp(user_id, tenant_id, code).await?;
+            self.totp
+                .verify_login_totp(user_id, tenant_id, code)
+                .await?;
             None
         };
         let roles = self.load_role_names(tenant_id, user_id).await?;
@@ -382,7 +479,15 @@ impl<R: UserRepository> AuthService<R> {
             .await
             .unwrap_or_default();
         let pair = self
-            .issue_tokens(user_id, tenant_id, login_audience, roles, permissions, None, None)
+            .issue_tokens(
+                user_id,
+                tenant_id,
+                login_audience,
+                roles,
+                permissions,
+                None,
+                None,
+            )
             .await?;
         self.record_auth_event(tenant_id, Some(user_id), true, "totp_enrollment_login")
             .await;
@@ -401,7 +506,7 @@ impl<R: UserRepository> AuthService<R> {
         let claims = self.jwt.verify_refresh_issuer(refresh_token)?;
         let audience = claims.aud.clone();
         let th = refresh_token_hash(refresh_token);
-        let rkey = format!("rrev:{th}");
+        let rkey = self.redis_key(&format!("rrev:{th}"));
         let mut conn = self.redis.clone();
         if conn.get::<_, Option<String>>(&rkey).await?.is_some() {
             return Err(AppError::Unauthorized);
@@ -442,7 +547,8 @@ impl<R: UserRepository> AuthService<R> {
         }
 
         let oauth_row_id: Option<Uuid> = row.try_get("oauth_client_row_id").ok().flatten();
-        let oauth_bound_public: Option<String> = row.try_get("oauth_client_public_id").ok().flatten();
+        let oauth_bound_public: Option<String> =
+            row.try_get("oauth_client_public_id").ok().flatten();
         let bound_public: Option<String> = row.try_get("bound_client_public").ok().flatten();
         let expected_public = bound_public
             .clone()
@@ -453,14 +559,17 @@ impl<R: UserRepository> AuthService<R> {
             let provided = client_id
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| AppError::Validation("client_id is required for this refresh token".to_string()))?;
-            let exp = expected_public
-                .as_deref()
-                .ok_or_else(|| AppError::Internal("refresh token missing bound client".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::Validation("client_id is required for this refresh token".to_string())
+                })?;
+            let exp = expected_public.as_deref().ok_or_else(|| {
+                AppError::Internal("refresh token missing bound client".to_string())
+            })?;
             if provided != exp {
                 return Err(AppError::Unauthorized);
             }
-            client_oauth::assert_grant_allowed(&self._pool, tenant_id, exp, "refresh_token").await?;
+            client_oauth::assert_grant_allowed(&self._pool, tenant_id, exp, "refresh_token")
+                .await?;
             let c_row = if let Some(cid) = oauth_row_id {
                 sqlx::query(
                     "SELECT client_type, client_secret_argon2, token_endpoint_auth_method FROM clients WHERE id = $1 AND tenant_id = $2",
@@ -487,7 +596,11 @@ impl<R: UserRepository> AuthService<R> {
                 let provided_sec = client_secret
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .ok_or_else(|| AppError::Validation("client_secret is required for confidential clients".to_string()))?;
+                    .ok_or_else(|| {
+                        AppError::Validation(
+                            "client_secret is required for confidential clients".to_string(),
+                        )
+                    })?;
                 if !client_oauth::verify_confidential_client_secret(&c_row, provided_sec) {
                     return Err(AppError::Unauthorized);
                 }
@@ -498,37 +611,117 @@ impl<R: UserRepository> AuthService<R> {
             }
         }
 
-        // Rotate: revoke this row, issue new pair in same family
-        let _ = sqlx::query(
-            "UPDATE refresh_tokens SET revoked = true, session_status = 'revoked', revoked_at = NOW() WHERE id = $1",
-        )
-        .bind(row_id)
-        .execute(&self._pool)
-        .await;
-        let _: () = conn
-            .set_ex(rkey, "1", (self.jwt.refresh_ttl_seconds().max(1)) as u64)
-            .await
-            .unwrap_or(());
+        let bound_for_ttl = oauth_bound_public.as_deref().or(bound_public.as_deref());
+        let (access_ttl, refresh_ttl, oauth_row_opt) = self
+            .effective_oauth_token_ttls(tenant_id, bound_for_ttl)
+            .await?;
 
         let roles = self.load_role_names(tenant_id, user_id).await?;
         let permissions = self
             .load_permission_names(tenant_id, user_id)
             .await
             .unwrap_or_default();
-        self.issue_tokens_with_family(
+
+        // Atomic rotation: only one concurrent refresh may revoke this row; mint + insert in the
+        // same transaction so we never leave the session revoked without a replacement row.
+        let mut tx = self._pool.begin().await?;
+        let upd = sqlx::query(
+            r#"UPDATE refresh_tokens SET revoked = true, session_status = 'revoked', revoked_at = NOW()
+               WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+                 AND revoked = false
+                 AND COALESCE(session_status, 'active') = 'active'
+                 AND token_hash = $4"#,
+        )
+        .bind(row_id)
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(&th)
+        .execute(&mut *tx)
+        .await?;
+
+        if upd.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(AppError::Unauthorized);
+        }
+
+        let oauth_client_pub = oauth_bound_public
+            .as_deref()
+            .or(bound_public.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let oauth_row_insert: Option<Uuid> = if let Some(r) = oauth_row_opt {
+            Some(r)
+        } else if let Some(pid) = oauth_client_pub {
+            sqlx::query_scalar("SELECT id FROM clients WHERE tenant_id = $1 AND client_id = $2")
+                .bind(tenant_id)
+                .bind(pid)
+                .fetch_optional(&mut *tx)
+                .await?
+        } else {
+            None
+        };
+
+        let ev = self.user_email_verified(user_id).await;
+        let new_row_id = Uuid::new_v4();
+        let access = self.jwt.mint_access_token(
             user_id,
             tenant_id,
             &audience,
-            roles,
-            permissions,
+            roles.clone(),
+            permissions.clone(),
+            ev,
             None,
+            Some(new_row_id),
+            Some(access_ttl),
+        )?;
+        let refresh_new = self.jwt.mint_refresh_token(
+            user_id,
+            tenant_id,
+            &audience,
+            ev,
+            new_row_id,
             family_id,
-            Some(row_id),
-            oauth_bound_public
-                .as_deref()
-                .or(bound_public.as_deref()),
+            Some(refresh_ttl),
+        )?;
+        let th_new = refresh_token_hash(&refresh_new);
+        let expires_at = Utc::now() + Duration::seconds(refresh_ttl);
+
+        sqlx::query(
+            "INSERT INTO refresh_tokens (id, tenant_id, user_id, token_hash, expires_at, revoked, token_family_id, rotated_from_id, jti_in_token, oauth_client_public_id, oauth_client_row_id)
+             VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10)",
         )
+        .bind(new_row_id)
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(&th_new)
+        .bind(expires_at)
+        .bind(family_id)
+        .bind(row_id)
+        .bind(new_row_id.to_string())
+        .bind(oauth_client_pub)
+        .bind(oauth_row_insert)
+        .execute(&mut *tx)
         .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "refresh_tokens insert failed during refresh rotation");
+            AppError::Internal("session persistence failed".to_string())
+        })?;
+
+        tx.commit().await?;
+
+        let _: () = conn
+            .set_ex(rkey, "1", (refresh_ttl.max(1)) as u64)
+            .await
+            .unwrap_or(());
+
+        Ok(TokenPair {
+            access_token: access,
+            refresh_token: refresh_new,
+            token_type: "Bearer".to_string(),
+            expires_in: access_ttl as u64,
+            id_token: None,
+        })
     }
 
     /// Verify OAuth client credentials for introspection / revocation. `client_id` is required.
@@ -538,7 +731,8 @@ impl<R: UserRepository> AuthService<R> {
         client_secret: Option<&str>,
         creds_source: ClientCredentialsSource,
     ) -> Result<(), AppError> {
-        client_oauth::resolve_introspect_client(&self._pool, client_id, client_secret, creds_source).await
+        client_oauth::resolve_introspect_client(&self._pool, client_id, client_secret, creds_source)
+            .await
     }
 
     /// Access token for OIDC userinfo: issuer/signature OK and `aud` is admin API audience or a registered OAuth client.
@@ -616,7 +810,7 @@ impl<R: UserRepository> AuthService<R> {
     pub async fn logout(&self, refresh_token: &str) -> Result<(), AppError> {
         let th = refresh_token_hash(refresh_token);
         let mut conn = self.redis.clone();
-        let rkey = format!("rrev:{th}");
+        let rkey = self.redis_key(&format!("rrev:{th}"));
         let _: () = conn
             .set_ex(rkey, "1", 60 * 60 * 24 * 14)
             .await
@@ -634,7 +828,11 @@ impl<R: UserRepository> AuthService<R> {
         Ok(())
     }
 
-    async fn load_role_names(&self, tenant_id: Uuid, user_id: Uuid) -> Result<Vec<String>, AppError> {
+    async fn load_role_names(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<String>, AppError> {
         let names: Vec<String> = sqlx::query_scalar(
             "SELECT r.name FROM roles r
              INNER JOIN user_roles ur ON ur.role_id = r.id AND ur.tenant_id = r.tenant_id
@@ -653,7 +851,11 @@ impl<R: UserRepository> AuthService<R> {
         }
     }
 
-    async fn load_permission_names(&self, tenant_id: Uuid, user_id: Uuid) -> Result<Vec<String>, AppError> {
+    async fn load_permission_names(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<String>, AppError> {
         let names: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT p.name FROM permissions p
              INNER JOIN role_permissions rp ON rp.permission_id = p.id AND rp.tenant_id = p.tenant_id
@@ -669,7 +871,13 @@ impl<R: UserRepository> AuthService<R> {
         Ok(names)
     }
 
-    async fn record_auth_event(&self, tenant_id: Uuid, user_id: Option<Uuid>, success: bool, event_kind: &str) {
+    async fn record_auth_event(
+        &self,
+        tenant_id: Uuid,
+        user_id: Option<Uuid>,
+        success: bool,
+        event_kind: &str,
+    ) {
         if let Err(e) = sqlx::query(
             "INSERT INTO auth_events (tenant_id, user_id, success, event_kind) VALUES ($1, $2, $3, $4)",
         )
@@ -716,11 +924,13 @@ impl<R: UserRepository> AuthService<R> {
             fam,
             None,
             oauth_client_public_id,
+            None,
         )
         .await
     }
 
     /// Issue access + refresh; `family_id` is stable across rotations; `rotated_from` for audit.
+    /// `ttl_precomputed`: from [`Self::effective_oauth_token_ttls`] or authorization-code path to avoid an extra query.
     async fn issue_tokens_with_family(
         &self,
         user_id: Uuid,
@@ -732,28 +942,48 @@ impl<R: UserRepository> AuthService<R> {
         family_id: Uuid,
         rotated_from: Option<Uuid>,
         oauth_client_public_id: Option<&str>,
+        ttl_precomputed: Option<(i64, i64, Option<Uuid>)>,
     ) -> Result<TokenPair, AppError> {
+        let (access_ttl, refresh_ttl, oauth_row) = match ttl_precomputed {
+            Some((a, r, row)) => (a, r, row),
+            None => {
+                let (a, r, row) = self
+                    .effective_oauth_token_ttls(tenant_id, oauth_client_public_id)
+                    .await?;
+                (a, r, row)
+            }
+        };
         let ev = self.user_email_verified(user_id).await;
         let row_id = Uuid::new_v4();
-        let access = self
-            .jwt
-            .mint_access_token(
-                user_id,
-                tenant_id,
-                audience,
-                roles.clone(),
-                permissions,
-                ev,
-                scope.clone(),
-                Some(row_id),
-            )?;
-        let refresh = self
-            .jwt
-            .mint_refresh_token(user_id, tenant_id, audience, ev, row_id, family_id)?;
+        let access = self.jwt.mint_access_token(
+            user_id,
+            tenant_id,
+            audience,
+            roles.clone(),
+            permissions,
+            ev,
+            scope.clone(),
+            Some(row_id),
+            Some(access_ttl),
+        )?;
+        let refresh = self.jwt.mint_refresh_token(
+            user_id,
+            tenant_id,
+            audience,
+            ev,
+            row_id,
+            family_id,
+            Some(refresh_ttl),
+        )?;
         let th = refresh_token_hash(&refresh);
-        let expires_at = Utc::now() + Duration::seconds(self.jwt.refresh_ttl_seconds());
+        let expires_at = Utc::now() + Duration::seconds(refresh_ttl);
 
-        let oauth_row: Option<Uuid> = if let Some(pid) = oauth_client_public_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let oauth_row: Option<Uuid> = if let Some(r) = oauth_row {
+            Some(r)
+        } else if let Some(pid) = oauth_client_public_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             sqlx::query_scalar("SELECT id FROM clients WHERE tenant_id = $1 AND client_id = $2")
                 .bind(tenant_id)
                 .bind(pid)
@@ -788,13 +1018,13 @@ impl<R: UserRepository> AuthService<R> {
             access_token: access,
             refresh_token: refresh,
             token_type: "Bearer".to_string(),
-            expires_in: self.jwt.access_ttl_seconds() as u64,
+            expires_in: access_ttl as u64,
             id_token: None,
         })
     }
 
     async fn rate_limit_login(&self, tenant_id: Uuid, email: &str) -> Result<(), AppError> {
-        let key = format!("login:attempt:{tenant_id}:{email}");
+        let key = self.redis_key(&format!("login:attempt:{tenant_id}:{email}"));
         let mut conn = self.redis.clone();
         let attempts: i64 = conn.incr(&key, 1).await?;
         if attempts == 1 {
@@ -809,7 +1039,7 @@ impl<R: UserRepository> AuthService<R> {
     }
 
     async fn register_failed_login(&self, tenant_id: Uuid, email: &str) -> Result<(), AppError> {
-        let key = format!("login:failed:{tenant_id}:{email}");
+        let key = self.redis_key(&format!("login:failed:{tenant_id}:{email}"));
         let mut conn = self.redis.clone();
         let failures: i64 = conn.incr(&key, 1).await?;
         if failures == 1 {
@@ -819,13 +1049,17 @@ impl<R: UserRepository> AuthService<R> {
     }
 
     async fn clear_failed_logins(&self, tenant_id: Uuid, email: &str) -> Result<(), AppError> {
-        let key = format!("login:failed:{tenant_id}:{email}");
+        let key = self.redis_key(&format!("login:failed:{tenant_id}:{email}"));
         let mut conn = self.redis.clone();
         let _: () = conn.del(key).await?;
         Ok(())
     }
 
-    pub async fn userinfo_from_token(&self, token: &str, audience: &str) -> Result<UserInfo, AppError> {
+    pub async fn userinfo_from_token(
+        &self,
+        token: &str,
+        audience: &str,
+    ) -> Result<UserInfo, AppError> {
         let claims = self.jwt.verify(token, audience)?;
         self.userinfo_from_access_claims(&claims).await
     }
@@ -885,7 +1119,9 @@ impl<R: UserRepository> AuthService<R> {
         let mfa_policy: String = row.get("mfa_policy");
         let allow: bool = row.get("allow_en");
         if mfa_policy != "required" {
-            return Err(AppError::Validation("client 2FA is not required; sign in with password".to_string()));
+            return Err(AppError::Validation(
+                "client 2FA is not required; sign in with password".to_string(),
+            ));
         }
         if !allow {
             return Err(AppError::Forbidden);
@@ -896,7 +1132,8 @@ impl<R: UserRepository> AuthService<R> {
             .await?
         {
             return Err(AppError::Validation(
-                "Authenticator is already set up for this app; use password and 2FA to sign in".to_string(),
+                "Authenticator is already set up for this app; use password and 2FA to sign in"
+                    .to_string(),
             ));
         }
         self.jwt.mint_client_totp_enroll_after_email(
@@ -913,10 +1150,13 @@ impl<R: UserRepository> AuthService<R> {
         &self,
         setup_bearer: &str,
     ) -> Result<(String, String), AppError> {
-        let c = self.jwt.verify_client_totp_enroll_after_email(setup_bearer.trim())?;
+        let c = self
+            .jwt
+            .verify_client_totp_enroll_after_email(setup_bearer.trim())?;
         let user_id = Uuid::parse_str(&c.sub).map_err(|_| AppError::Unauthorized)?;
         let tenant_id = Uuid::parse_str(&c.tenant_id).map_err(|_| AppError::Unauthorized)?;
-        let client_row = Uuid::parse_str(&c.oauth_client_row_id).map_err(|_| AppError::Unauthorized)?;
+        let client_row =
+            Uuid::parse_str(&c.oauth_client_row_id).map_err(|_| AppError::Unauthorized)?;
         self.totp
             .begin_client_setup(
                 user_id,
@@ -933,10 +1173,13 @@ impl<R: UserRepository> AuthService<R> {
         setup_bearer: &str,
         code: &str,
     ) -> Result<TokenPair, AppError> {
-        let c = self.jwt.verify_client_totp_enroll_after_email(setup_bearer.trim())?;
+        let c = self
+            .jwt
+            .verify_client_totp_enroll_after_email(setup_bearer.trim())?;
         let user_id = Uuid::parse_str(&c.sub).map_err(|_| AppError::Unauthorized)?;
         let tenant_id = Uuid::parse_str(&c.tenant_id).map_err(|_| AppError::Unauthorized)?;
-        let client_row = Uuid::parse_str(&c.oauth_client_row_id).map_err(|_| AppError::Unauthorized)?;
+        let client_row =
+            Uuid::parse_str(&c.oauth_client_row_id).map_err(|_| AppError::Unauthorized)?;
         self.totp
             .complete_client_setup(
                 user_id,
@@ -1019,8 +1262,8 @@ impl<R: UserRepository> AuthService<R> {
         let password_hash: String = row.get("password_hash");
         let registration_source: String = row.get("registration_source");
         let totp_enc: Option<Vec<u8>> = row.get("client_totp_secret_enc");
-        let totp_enc =
-            totp_enc.ok_or_else(|| AppError::Internal("pending totp secret missing".to_string()))?;
+        let totp_enc = totp_enc
+            .ok_or_else(|| AppError::Internal("pending totp secret missing".to_string()))?;
 
         let user_id = Uuid::new_v4();
         let ins_user = sqlx::query(
@@ -1046,12 +1289,14 @@ impl<R: UserRepository> AuthService<R> {
             }
         }
 
-        sqlx::query("INSERT INTO credentials (user_id, tenant_id, password_hash) VALUES ($1, $2, $3)")
-            .bind(user_id)
-            .bind(tenant_id)
-            .bind(&password_hash)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO credentials (user_id, tenant_id, password_hash) VALUES ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(&password_hash)
+        .execute(&mut *tx)
+        .await?;
 
         let mfa_row_id = Uuid::new_v4();
         sqlx::query(
@@ -1073,12 +1318,16 @@ impl<R: UserRepository> AuthService<R> {
 
         tx.commit().await?;
 
-        let pub_cid: String = sqlx::query_scalar("SELECT client_id::text FROM clients WHERE id = $1 AND tenant_id = $2")
-            .bind(oauth_client_row_id)
-            .bind(tenant_id)
-            .fetch_optional(&self._pool)
-            .await?
-            .ok_or_else(|| AppError::Internal("oauth client row missing after registration".to_string()))?;
+        let pub_cid: String = sqlx::query_scalar(
+            "SELECT client_id::text FROM clients WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(oauth_client_row_id)
+        .bind(tenant_id)
+        .fetch_optional(&self._pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal("oauth client row missing after registration".to_string())
+        })?;
 
         let roles = self.load_role_names(tenant_id, user_id).await?;
         let perms = self
@@ -1122,14 +1371,13 @@ impl<R: UserRepository> AuthService<R> {
         scope: &str,
         ttl: chrono::Duration,
     ) -> Result<String, AppError> {
-        let client_row_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM clients WHERE tenant_id = $1 AND client_id = $2",
-        )
-        .bind(tenant_id)
-        .bind(client_id)
-        .fetch_optional(&self._pool)
-        .await?
-        .ok_or_else(|| AppError::Validation("unknown oauth client".to_string()))?;
+        let client_row_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM clients WHERE tenant_id = $1 AND client_id = $2")
+                .bind(tenant_id)
+                .bind(client_id)
+                .fetch_optional(&self._pool)
+                .await?
+                .ok_or_else(|| AppError::Validation("unknown oauth client".to_string()))?;
 
         let code = Uuid::new_v4().to_string().replace('-', "")
             + &Uuid::new_v4().to_string().replace('-', "");
@@ -1203,7 +1451,9 @@ impl<R: UserRepository> AuthService<R> {
             .unwrap_or_else(|_| "S256".to_string());
         if challenge_method == "none" {
             if !code_verifier.is_empty() {
-                return Err(AppError::Validation("code_verifier must be empty for PKCE method none".to_string()));
+                return Err(AppError::Validation(
+                    "code_verifier must be empty for PKCE method none".to_string(),
+                ));
             }
         } else if !Self::verify_pkce_s256(code_verifier, &challenge) {
             return Err(AppError::Validation("invalid code_verifier".to_string()));
@@ -1213,11 +1463,13 @@ impl<R: UserRepository> AuthService<R> {
         let nonce: Option<String> = row.get("nonce");
         let scope_s: String = row.get("scope");
 
-        client_oauth::assert_grant_allowed(&self._pool, tenant_id, client_id, "authorization_code").await?;
+        client_oauth::assert_grant_allowed(&self._pool, tenant_id, client_id, "authorization_code")
+            .await?;
 
         // Verify OAuth client and optional secret
         let c_row = sqlx::query(
-            "SELECT id, client_type, client_secret_argon2, scopes, token_endpoint_auth_method
+            "SELECT id, client_type, client_secret_argon2, scopes, token_endpoint_auth_method,
+                    access_ttl_seconds, refresh_ttl_seconds
              FROM clients WHERE client_id = $1 AND tenant_id = $2",
         )
         .bind(client_id)
@@ -1267,6 +1519,10 @@ impl<R: UserRepository> AuthService<R> {
             Some(scope_s.clone())
         };
         let fam = Uuid::new_v4();
+        let client_row_id: Uuid = c_row.get("id");
+        let a_db: Option<i32> = c_row.try_get("access_ttl_seconds").ok().flatten();
+        let r_db: Option<i32> = c_row.try_get("refresh_ttl_seconds").ok().flatten();
+        let (ea, er) = self.resolve_effective_token_ttls_from_db_columns(a_db, r_db);
         let mut pair = self
             .issue_tokens_with_family(
                 user_id,
@@ -1278,6 +1534,7 @@ impl<R: UserRepository> AuthService<R> {
                 fam,
                 None,
                 Some(client_id),
+                Some((ea, er, Some(client_row_id))),
             )
             .await?;
         if scope_s.split_whitespace().any(|s| s == "openid") {
@@ -1293,6 +1550,7 @@ impl<R: UserRepository> AuthService<R> {
                 email.clone(),
                 ev,
                 &pair.access_token,
+                Some(ea),
             )?;
             pair.id_token = Some(idt);
         }
@@ -1323,7 +1581,8 @@ impl<R: UserRepository> AuthService<R> {
         .unwrap_or(false);
         if !ok {
             return Err(AppError::Validation(
-                "unknown client or session exchange not allowed for this embedded_flow_mode".to_string(),
+                "unknown client or session exchange not allowed for this embedded_flow_mode"
+                    .to_string(),
             ));
         }
         let client_row_id: Uuid = sqlx::query_scalar(
@@ -1392,7 +1651,13 @@ impl<R: UserRepository> AuthService<R> {
         let tenant_id: Uuid = row.get("tenant_id");
         let user_id: Uuid = row.get("user_id");
 
-        client_oauth::assert_grant_allowed(&self._pool, tenant_id, oauth_client_public_id, "embedded_session").await?;
+        client_oauth::assert_grant_allowed(
+            &self._pool,
+            tenant_id,
+            oauth_client_public_id,
+            "embedded_session",
+        )
+        .await?;
 
         let c_row = sqlx::query(
             "SELECT id, client_type, client_secret_argon2, token_endpoint_auth_method

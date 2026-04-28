@@ -1,0 +1,7 @@
+# Paths excluded from Semgrep (large / third-party).
+node_modules/
+target/
+**/dist/
+AAuthLib/embedded-auth/node_modules/
+sdk/embedded-auth/node_modules/
+test/reports/

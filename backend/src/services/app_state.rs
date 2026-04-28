@@ -6,16 +6,11 @@ use redis::aio::ConnectionManager;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::{
-    config::AppConfig,
-    email::ExmailMailer,
-    oidc::proxy::OidcProxy,
+    config::AppConfig, email::ExmailMailer, oidc::proxy::OidcProxy,
     repositories::email_verification_repository::EmailVerificationRepository,
-    repositories::user_repository::PostgresUserRepository,
-    security::crypto::TotpEncryption,
-    security::jwt::JwtService,
-    services::auth_service::AuthService,
-    services::email_verification_service::EmailVerificationService,
-    services::errors::AppError,
+    repositories::user_repository::PostgresUserRepository, security::crypto::TotpEncryption,
+    security::jwt::JwtService, services::auth_service::AuthService,
+    services::email_verification_service::EmailVerificationService, services::errors::AppError,
     services::totp_service::TotpService,
 };
 
@@ -69,15 +64,21 @@ impl AppState {
 
         let client_mfa_enforce = config.oidc.client_mfa_enforce;
         let require_login_2fa = config.auth.require_login_2fa;
+        let max_client_access_ttl_seconds = config.auth.max_client_access_ttl_seconds;
+        let max_client_refresh_ttl_seconds = config.auth.max_client_refresh_ttl_seconds;
+        let redis_prefix = config.redis.prefix.clone();
         let auth = Arc::new(AuthService {
             users: user_repo.clone(),
             jwt,
             redis,
+            redis_prefix,
             _pool: pool.clone(),
             ev: ev.clone(),
             totp: totp.clone(),
             client_mfa_enforce,
             require_login_2fa,
+            max_client_access_ttl_seconds,
+            max_client_refresh_ttl_seconds,
         });
 
         Ok(Self {
@@ -105,7 +106,7 @@ impl AppState {
         if max_attempts == 0 {
             return Ok(());
         }
-        let key = format!("{redis_key}:{ip}");
+        let key = self.config.redis.key(&format!("{redis_key}:{ip}"));
         let mut r = self.auth.redis.clone();
         let n: i64 = match r.incr(&key, 1).await {
             Ok(v) => v,
@@ -145,8 +146,9 @@ fn totp_key_bytes(config: &AppConfig) -> Result<[u8; 32], AppError> {
     let raw = base64::engine::general_purpose::STANDARD
         .decode(config.totp.encryption_key_b64.trim().as_bytes())
         .map_err(|e| AppError::Config(format!("TOTP__ENCRYPTION_KEY_B64: {e}")))?;
-    raw.try_into()
-        .map_err(|_| AppError::Config("TOTP__ENCRYPTION_KEY_B64 must decode to exactly 32 bytes".to_string()))
+    raw.try_into().map_err(|_| {
+        AppError::Config("TOTP__ENCRYPTION_KEY_B64 must decode to exactly 32 bytes".to_string())
+    })
 }
 
 fn totp_previous_key_bytes(config: &AppConfig) -> Result<Option<[u8; 32]>, AppError> {
@@ -160,8 +162,10 @@ fn totp_previous_key_bytes(config: &AppConfig) -> Result<Option<[u8; 32]>, AppEr
     let raw = base64::engine::general_purpose::STANDARD
         .decode(t.as_bytes())
         .map_err(|e| AppError::Config(format!("TOTP__ENCRYPTION_KEY_PREVIOUS_B64: {e}")))?;
-    let arr: [u8; 32] = raw
-        .try_into()
-        .map_err(|_| AppError::Config("TOTP__ENCRYPTION_KEY_PREVIOUS_B64 must decode to exactly 32 bytes".to_string()))?;
+    let arr: [u8; 32] = raw.try_into().map_err(|_| {
+        AppError::Config(
+            "TOTP__ENCRYPTION_KEY_PREVIOUS_B64 must decode to exactly 32 bytes".to_string(),
+        )
+    })?;
     Ok(Some(arr))
 }

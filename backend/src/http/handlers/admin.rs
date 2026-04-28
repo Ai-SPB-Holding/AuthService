@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use axum::{Extension, Json, extract::{Path, Query, State}};
+use axum::{
+    Extension, Json,
+    extract::{Path, Query, State},
+};
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::{Error as SqlxError, PgPool, Row};
@@ -14,6 +17,14 @@ use crate::services::{app_state::AppState, errors::AppError};
 
 use super::admin_portal::insert_audit_log;
 
+/// `GET {issuer}/.well-known/openid-configuration` (normalized `SERVER__ISSUER`).
+fn openid_configuration_url(issuer: &str) -> String {
+    format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    )
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListUsersQuery {
     pub q: Option<String>,
@@ -23,7 +34,10 @@ pub struct ListUsersQuery {
     pub order: Option<String>,
 }
 
-fn users_list_order_clause(sort: Option<&str>, order: Option<&str>) -> (&'static str, &'static str) {
+fn users_list_order_clause(
+    sort: Option<&str>,
+    order: Option<&str>,
+) -> (&'static str, &'static str) {
     let col = match sort {
         Some("email") => "email",
         Some("registration_source") => "registration_source",
@@ -97,6 +111,12 @@ pub struct CreateClientRequest {
     pub default_max_age_seconds: Option<i32>,
     #[serde(default)]
     pub use_v2_endpoints_only: Option<bool>,
+    /// Per-client access JWT lifetime (seconds). Omit or `null` = use server `AUTH__ACCESS_TTL_SECONDS`.
+    #[serde(default)]
+    pub access_ttl_seconds: Option<i32>,
+    /// Per-client refresh token lifetime (seconds). Omit or `null` = use server `AUTH__REFRESH_TTL_SECONDS`.
+    #[serde(default)]
+    pub refresh_ttl_seconds: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -118,11 +138,16 @@ fn normalize_client_type(v: Option<&str>) -> Result<&'static str, AppError> {
     match v.unwrap_or("public").trim().to_ascii_lowercase().as_str() {
         "public" => Ok("public"),
         "confidential" => Ok("confidential"),
-        _ => Err(AppError::Validation("client_type must be public or confidential".to_string())),
+        _ => Err(AppError::Validation(
+            "client_type must be public or confidential".to_string(),
+        )),
     }
 }
 
-fn normalize_token_endpoint_auth_method(v: Option<&str>, client_type: &str) -> Result<String, AppError> {
+fn normalize_token_endpoint_auth_method(
+    v: Option<&str>,
+    client_type: &str,
+) -> Result<String, AppError> {
     let d = if client_type == "confidential" {
         "client_secret_basic"
     } else {
@@ -130,9 +155,11 @@ fn normalize_token_endpoint_auth_method(v: Option<&str>, client_type: &str) -> R
     };
     let s = v.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(d);
     let out = match s.to_ascii_lowercase().as_str() {
-        "none" | "client_secret_basic" | "client_secret_post" | "private_key_jwt" | "tls_client_auth" => {
-            s.to_ascii_lowercase()
-        }
+        "none"
+        | "client_secret_basic"
+        | "client_secret_post"
+        | "private_key_jwt"
+        | "tls_client_auth" => s.to_ascii_lowercase(),
         _ => {
             return Err(AppError::Validation(
                 "token_endpoint_auth_method must be none, client_secret_basic, client_secret_post, private_key_jwt, or tls_client_auth"
@@ -142,38 +169,55 @@ fn normalize_token_endpoint_auth_method(v: Option<&str>, client_type: &str) -> R
     };
     if client_type == "confidential" && out == "none" {
         return Err(AppError::Validation(
-            "confidential clients must use a client-authentication method other than none".to_string(),
+            "confidential clients must use a client-authentication method other than none"
+                .to_string(),
         ));
     }
     Ok(out)
 }
 
 fn normalize_embedded_flow_mode(v: Option<&str>) -> Result<&'static str, AppError> {
-    match v.unwrap_or("code_exchange").trim().to_ascii_lowercase().as_str() {
+    match v
+        .unwrap_or("code_exchange")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "code_exchange" => Ok("code_exchange"),
         "bff_cookie" => Ok("bff_cookie"),
         "legacy_postmessage" => Ok("legacy_postmessage"),
         _ => Err(AppError::Validation(
-            "embedded_flow_mode must be code_exchange, bff_cookie, or legacy_postmessage".to_string(),
+            "embedded_flow_mode must be code_exchange, bff_cookie, or legacy_postmessage"
+                .to_string(),
         )),
     }
 }
 
 fn is_localhost(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
 }
 
 fn validate_redirect_urls(uris: &[String]) -> Result<(), AppError> {
     if uris.is_empty() {
-        return Err(AppError::Validation("at least one redirect URL is required".to_string()));
+        return Err(AppError::Validation(
+            "at least one redirect URL is required".to_string(),
+        ));
     }
     for u in uris {
         if u.contains('*') {
-            return Err(AppError::Validation("redirect URLs must not contain wildcards".to_string()));
+            return Err(AppError::Validation(
+                "redirect URLs must not contain wildcards".to_string(),
+            ));
         }
-        let parsed = url::Url::parse(u).map_err(|_| AppError::Validation(format!("invalid redirect URL: {u}")))?;
+        let parsed = url::Url::parse(u)
+            .map_err(|_| AppError::Validation(format!("invalid redirect URL: {u}")))?;
         if parsed.fragment().is_some() {
-            return Err(AppError::Validation("redirect URLs must not include URL fragments".to_string()));
+            return Err(AppError::Validation(
+                "redirect URLs must not include URL fragments".to_string(),
+            ));
         }
         match parsed.scheme() {
             "https" => {}
@@ -190,21 +234,37 @@ fn validate_redirect_urls(uris: &[String]) -> Result<(), AppError> {
 
 fn merge_redirect_urls(req: &CreateClientRequest) -> Result<Vec<String>, AppError> {
     let mut urls = Vec::new();
-    if let Some(primary) = req.redirect_uri.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(primary) = req
+        .redirect_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         urls.push(primary.to_string());
     }
     if let Some(v) = &req.redirect_urls {
-        urls.extend(v.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        urls.extend(
+            v.iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
     }
     if let Some(v) = &req.allowed_redirect_uris {
-        urls.extend(v.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        urls.extend(
+            v.iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
     }
     urls.dedup();
     validate_redirect_urls(&urls)?;
     Ok(urls)
 }
 
-fn normalized_client_schema(allow_registration: bool, schema: Option<&Vec<UserSchemaField>>) -> Result<Vec<UserSchemaField>, AppError> {
+fn normalized_client_schema(
+    allow_registration: bool,
+    schema: Option<&Vec<UserSchemaField>>,
+) -> Result<Vec<UserSchemaField>, AppError> {
     if !allow_registration {
         return Ok(Vec::new());
     }
@@ -232,25 +292,42 @@ fn normalized_client_schema(allow_registration: bool, schema: Option<&Vec<UserSc
     }
     out.retain(|f| !f.field_name.is_empty() && !f.field_type.is_empty());
     if out.is_empty() {
-        return Err(AppError::Validation("user schema must contain at least one field".to_string()));
+        return Err(AppError::Validation(
+            "user schema must contain at least one field".to_string(),
+        ));
     }
     if out.iter().any(|f| f.field_name.len() > 64) {
-        return Err(AppError::Validation("field_name max length is 64".to_string()));
+        return Err(AppError::Validation(
+            "field_name max length is 64".to_string(),
+        ));
     }
     let mut seen = std::collections::HashSet::new();
     if out.iter().any(|f| !seen.insert(f.field_name.clone())) {
-        return Err(AppError::Validation("duplicate field_name in user schema".to_string()));
+        return Err(AppError::Validation(
+            "duplicate field_name in user schema".to_string(),
+        ));
     }
     let auth_count = out.iter().filter(|f| f.is_auth).count();
     if auth_count == 0 {
-        return Err(AppError::Validation("at least one auth field is required".to_string()));
+        return Err(AppError::Validation(
+            "at least one auth field is required".to_string(),
+        ));
     }
-    if out.iter().any(|f| f.is_auth && f.field_name == "password_hash") && !out.iter().any(|f| f.field_name == "password_hash" && f.is_required)
+    if out
+        .iter()
+        .any(|f| f.is_auth && f.field_name == "password_hash")
+        && !out
+            .iter()
+            .any(|f| f.field_name == "password_hash" && f.is_required)
     {
-        return Err(AppError::Validation("password_hash must be required when used for auth".to_string()));
+        return Err(AppError::Validation(
+            "password_hash must be required when used for auth".to_string(),
+        ));
     }
     if !out.iter().any(|f| f.field_name == "email" && f.is_auth) && auth_count < 1 {
-        return Err(AppError::Validation("email can be removed from auth only if another auth field exists".to_string()));
+        return Err(AppError::Validation(
+            "email can be removed from auth only if another auth field exists".to_string(),
+        ));
     }
     Ok(out)
 }
@@ -268,35 +345,81 @@ fn normalize_mfa_policy(v: Option<&str>) -> Result<&'static str, AppError> {
     parse_mfa_policy(v).map_err(AppError::Validation)
 }
 
+/// Validates optional `clients.access_ttl_seconds` / `refresh_ttl_seconds` against DB bounds and operator caps.
+fn validate_client_oauth_token_ttl(
+    access: Option<i32>,
+    refresh: Option<i32>,
+    max_access_cap: u64,
+    max_refresh_cap: u64,
+) -> Result<(), AppError> {
+    let max_a = (max_access_cap as i64).min(86_400).max(60);
+    let max_r = (max_refresh_cap as i64).min(7_776_000).max(300);
+    if let Some(a) = access {
+        if a < 60 || i64::from(a) > max_a {
+            return Err(AppError::Validation(format!(
+                "access_ttl_seconds must be between 60 and {max_a} (inclusive, operator cap)"
+            )));
+        }
+    }
+    if let Some(r) = refresh {
+        if r < 300 || i64::from(r) > max_r {
+            return Err(AppError::Validation(format!(
+                "refresh_ttl_seconds must be between 300 and {max_r} (inclusive, operator cap)"
+            )));
+        }
+    }
+    if let (Some(a), Some(r)) = (access, refresh) {
+        if r < a {
+            return Err(AppError::Validation(
+                "refresh_ttl_seconds must be >= access_ttl_seconds".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validates entries for `clients.embedded_parent_origins` (exact origins or `https://*.host`).
 fn validate_embedded_parent_origins(origins: &[String]) -> Result<(), AppError> {
     if origins.len() > 48 {
-        return Err(AppError::Validation("embedded_parent_origins: at most 48 entries".to_string()));
+        return Err(AppError::Validation(
+            "embedded_parent_origins: at most 48 entries".to_string(),
+        ));
     }
     for raw in origins {
         let t = raw.trim();
         if t.is_empty() {
-            return Err(AppError::Validation("embedded_parent_origins: empty entry".to_string()));
+            return Err(AppError::Validation(
+                "embedded_parent_origins: empty entry".to_string(),
+            ));
         }
         if t.contains('*') && !t.starts_with("https://*.") && !t.starts_with("http://*.") {
-            return Err(AppError::Validation(format!("invalid embedded origin: {t}")));
+            return Err(AppError::Validation(format!(
+                "invalid embedded origin: {t}"
+            )));
         }
         if let Some(dom) = t.strip_prefix("https://*.") {
             if dom.is_empty() || dom.contains('/') || dom.contains('*') {
-                return Err(AppError::Validation(format!("invalid wildcard origin: {t}")));
+                return Err(AppError::Validation(format!(
+                    "invalid wildcard origin: {t}"
+                )));
             }
             continue;
         }
         if let Some(dom) = t.strip_prefix("http://*.") {
             if dom.is_empty() || dom.contains('/') || dom.contains('*') {
-                return Err(AppError::Validation(format!("invalid wildcard origin: {t}")));
+                return Err(AppError::Validation(format!(
+                    "invalid wildcard origin: {t}"
+                )));
             }
             continue;
         }
-        let u = url::Url::parse(t).map_err(|_| AppError::Validation(format!("invalid origin: {t}")))?;
+        let u =
+            url::Url::parse(t).map_err(|_| AppError::Validation(format!("invalid origin: {t}")))?;
         let path = u.path();
         if !path.is_empty() && path != "/" {
-            return Err(AppError::Validation(format!("embedded origin must have no path: {t}")));
+            return Err(AppError::Validation(format!(
+                "embedded origin must have no path: {t}"
+            )));
         }
         match u.scheme() {
             "https" => {}
@@ -314,15 +437,18 @@ fn validate_embedded_parent_origins(origins: &[String]) -> Result<(), AppError> 
 async fn generate_unique_client_id(pool: &PgPool) -> Result<String, AppError> {
     for _ in 0..20 {
         let candidate = generate_base62_client_id(10);
-        let exists: Option<String> = sqlx::query_scalar("SELECT client_id FROM clients WHERE client_id = $1")
-            .bind(&candidate)
-            .fetch_optional(pool)
-            .await?;
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT client_id FROM clients WHERE client_id = $1")
+                .bind(&candidate)
+                .fetch_optional(pool)
+                .await?;
         if exists.is_none() {
             return Ok(candidate);
         }
     }
-    Err(AppError::Internal("failed to generate unique client_id".to_string()))
+    Err(AppError::Internal(
+        "failed to generate unique client_id".to_string(),
+    ))
 }
 
 pub async fn generate_client_id(
@@ -361,7 +487,8 @@ pub struct GenerateTenantIdResponse {
 }
 
 fn actor_tenant(claims: &AccessClaims) -> Result<Uuid, AppError> {
-    Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))
+    Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))
 }
 
 fn actor_user_id(claims: &AccessClaims) -> Option<Uuid> {
@@ -410,12 +537,14 @@ async fn relocate_user_tenant(
         .bind(old_tenant)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("UPDATE email_verifications SET tenant_id = $1 WHERE user_id = $2 AND tenant_id = $3")
-        .bind(new_tenant)
-        .bind(user_id)
-        .bind(old_tenant)
-        .execute(&mut *tx)
-        .await;
+    let _ = sqlx::query(
+        "UPDATE email_verifications SET tenant_id = $1 WHERE user_id = $2 AND tenant_id = $3",
+    )
+    .bind(new_tenant)
+    .bind(user_id)
+    .bind(old_tenant)
+    .execute(&mut *tx)
+    .await;
     sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND tenant_id = $2")
         .bind(user_id)
         .bind(old_tenant)
@@ -442,8 +571,10 @@ pub async fn create_client(
     Extension(claims): Extension<AccessClaims>,
     Json(req): Json<CreateClientRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let actor_tenant = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let actor_tenant = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let target_tenant = req.tenant_id.unwrap_or(actor_tenant);
     if !global && target_tenant != actor_tenant {
         return Err(AppError::Forbidden);
@@ -455,11 +586,19 @@ pub async fn create_client(
     let allow_registration = req.allow_user_registration.unwrap_or(false);
     let redirect_urls = merge_redirect_urls(&req)?;
     let primary_redirect = redirect_urls[0].clone();
-    let allowed_redirect: serde_json::Value = serde_json::to_value(&redirect_urls).map_err(|e| AppError::Validation(e.to_string()))?;
+    let allowed_redirect: serde_json::Value =
+        serde_json::to_value(&redirect_urls).map_err(|e| AppError::Validation(e.to_string()))?;
     let user_schema = normalized_client_schema(allow_registration, req.user_schema.as_ref())?;
-    let client_id = if let Some(cid) = req.client_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let client_id = if let Some(cid) = req
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         if cid.len() < 6 || cid.len() > 12 || !cid.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(AppError::Validation("client_id must be 6..12 base62 chars".to_string()));
+            return Err(AppError::Validation(
+                "client_id must be 6..12 base62 chars".to_string(),
+            ));
         }
         cid.to_string()
     } else {
@@ -495,19 +634,21 @@ pub async fn create_client(
         .filter(|s| !s.is_empty())
         .map(String::from);
     let emb_v2 = req.embedded_protocol_v2.unwrap_or(false);
-    let emb_theme = crate::domain::embedded_ui_theme::validate_embedded_ui_theme(req.embedded_ui_theme.as_ref())
-        .map_err(AppError::Validation)?;
-    let token_method = normalize_token_endpoint_auth_method(req.token_endpoint_auth_method.as_deref(), client_type)?;
-    let grant_types = req
-        .grant_types
-        .clone()
-        .unwrap_or_else(|| {
-            vec![
-                "authorization_code".to_string(),
-                "refresh_token".to_string(),
-                "embedded_session".to_string(),
-            ]
-        });
+    let emb_theme = crate::domain::embedded_ui_theme::validate_embedded_ui_theme(
+        req.embedded_ui_theme.as_ref(),
+    )
+    .map_err(AppError::Validation)?;
+    let token_method = normalize_token_endpoint_auth_method(
+        req.token_endpoint_auth_method.as_deref(),
+        client_type,
+    )?;
+    let grant_types = req.grant_types.clone().unwrap_or_else(|| {
+        vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+            "embedded_session".to_string(),
+        ]
+    });
     let response_types = req
         .response_types
         .clone()
@@ -517,8 +658,9 @@ pub async fn create_client(
         .pkce_methods
         .clone()
         .unwrap_or_else(|| vec!["S256".to_string()]);
-    let post_logout = serde_json::to_value(req.post_logout_redirect_uris.clone().unwrap_or_default())
-        .map_err(|e| AppError::Validation(e.to_string()))?;
+    let post_logout =
+        serde_json::to_value(req.post_logout_redirect_uris.clone().unwrap_or_default())
+            .map_err(|e| AppError::Validation(e.to_string()))?;
     let embedded_flow = normalize_embedded_flow_mode(req.embedded_flow_mode.as_deref())?;
     let client_jwks_uri = req
         .client_jwks_uri
@@ -530,9 +672,16 @@ pub async fn create_client(
     let default_max_age = req.default_max_age_seconds;
     let use_v2_only = req.use_v2_endpoints_only.unwrap_or(false);
 
+    validate_client_oauth_token_ttl(
+        req.access_ttl_seconds,
+        req.refresh_ttl_seconds,
+        state.config.auth.max_client_access_ttl_seconds,
+        state.config.auth.max_client_refresh_ttl_seconds,
+    )?;
+
     sqlx::query(
-        "INSERT INTO clients (id, tenant_id, client_id, client_secret_argon2, client_type, redirect_uri, scopes, allowed_redirect_uris, allow_user_registration, mfa_policy, allow_client_totp_enrollment, embedded_login_enabled, embedded_token_audience, embedded_parent_origins, embedded_protocol_v2, embedded_ui_theme, token_endpoint_auth_method, grant_types, response_types, require_pkce, pkce_methods, post_logout_redirect_uris, embedded_flow_mode, client_jwks_uri, client_jwks, default_max_age_seconds, use_v2_endpoints_only)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)",
+        "INSERT INTO clients (id, tenant_id, client_id, client_secret_argon2, client_type, redirect_uri, scopes, allowed_redirect_uris, allow_user_registration, mfa_policy, allow_client_totp_enrollment, embedded_login_enabled, embedded_token_audience, embedded_parent_origins, embedded_protocol_v2, embedded_ui_theme, token_endpoint_auth_method, grant_types, response_types, require_pkce, pkce_methods, post_logout_redirect_uris, embedded_flow_mode, client_jwks_uri, client_jwks, default_max_age_seconds, use_v2_endpoints_only, access_ttl_seconds, refresh_ttl_seconds)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)",
     )
     .bind(id)
     .bind(tenant_id)
@@ -561,6 +710,8 @@ pub async fn create_client(
     .bind(client_jwks)
     .bind(default_max_age)
     .bind(use_v2_only)
+    .bind(req.access_ttl_seconds)
+    .bind(req.refresh_ttl_seconds)
     .execute(&state.pool)
     .await
     .map_err(|e| {
@@ -593,6 +744,7 @@ pub async fn create_client(
     )
     .await;
 
+    let server_metadata_url = openid_configuration_url(state.config.server.issuer.as_str());
     Ok(Json(serde_json::json!({
         "id": id,
         "ok": true,
@@ -600,6 +752,7 @@ pub async fn create_client(
         "client_type": client_type,
         "allow_user_registration": allow_registration,
         "client_secret": client_secret_plain,
+        "server_metadata_url": server_metadata_url,
         "message": if client_type == "confidential" { "Store client_secret securely; it is not shown again." } else { "Public client created." }
     })))
 }
@@ -610,7 +763,8 @@ pub async fn create_user(
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let actor_tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     if !global && req.tenant_id != actor_tid {
         return Err(AppError::Forbidden);
     }
@@ -620,16 +774,22 @@ pub async fn create_user(
 
     let password_hash = if let Some(ref p) = req.password {
         if p.len() < 8 {
-            return Err(AppError::Validation("password must be at least 8 characters".to_string()));
+            return Err(AppError::Validation(
+                "password must be at least 8 characters".to_string(),
+            ));
         }
         hash_password(p).map_err(AppError::Internal)?
     } else if let Some(ref h) = req.password_hash {
         if h.is_empty() {
-            return Err(AppError::Validation("password or password_hash is required".to_string()));
+            return Err(AppError::Validation(
+                "password or password_hash is required".to_string(),
+            ));
         }
         h.clone()
     } else {
-        return Err(AppError::Validation("password or password_hash is required".to_string()));
+        return Err(AppError::Validation(
+            "password or password_hash is required".to_string(),
+        ));
     };
 
     let email = req.email.trim().to_lowercase();
@@ -681,7 +841,8 @@ pub async fn create_role(
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     if !global && req.tenant_id != tid {
         return Err(AppError::Forbidden);
     }
@@ -701,7 +862,8 @@ pub async fn create_permission(
     Json(req): Json<CreatePermissionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     if !global && req.tenant_id != tid {
         return Err(AppError::Forbidden);
     }
@@ -721,8 +883,10 @@ pub async fn update_client(
     Path(id): Path<Uuid>,
     Json(req): Json<CreateClientRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let actor_tenant = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let actor_tenant = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let client_tenant: Option<Uuid> = if global {
         sqlx::query_scalar("SELECT tenant_id FROM clients WHERE id = $1")
             .bind(id)
@@ -741,7 +905,8 @@ pub async fn update_client(
     let actor = Uuid::parse_str(&claims.sub).ok();
     let redirect_urls = merge_redirect_urls(&req)?;
     let primary_redirect = redirect_urls[0].clone();
-    let allowed_redirect: serde_json::Value = serde_json::to_value(&redirect_urls).map_err(|e| AppError::Validation(e.to_string()))?;
+    let allowed_redirect: serde_json::Value =
+        serde_json::to_value(&redirect_urls).map_err(|e| AppError::Validation(e.to_string()))?;
     let allow_registration = req.allow_user_registration.unwrap_or(false);
     let user_schema = normalized_client_schema(allow_registration, req.user_schema.as_ref())?;
     let client_id = req
@@ -802,10 +967,17 @@ pub async fn update_client(
         cur_theme
     };
 
+    validate_client_oauth_token_ttl(
+        req.access_ttl_seconds,
+        req.refresh_ttl_seconds,
+        state.config.auth.max_client_access_ttl_seconds,
+        state.config.auth.max_client_refresh_ttl_seconds,
+    )?;
+
     let n = sqlx::query(
         "UPDATE clients SET client_id = $2, redirect_uri = $3, scopes = $4, allowed_redirect_uris = $5, allow_user_registration = $6, mfa_policy = $7, allow_client_totp_enrollment = $8,
             embedded_login_enabled = $10, embedded_token_audience = $11, embedded_parent_origins = $12,
-            embedded_protocol_v2 = $13, embedded_ui_theme = $14
+            embedded_protocol_v2 = $13, embedded_ui_theme = $14, access_ttl_seconds = $15, refresh_ttl_seconds = $16
          WHERE id = $1 AND tenant_id = $9",
     )
     .bind(id)
@@ -822,6 +994,8 @@ pub async fn update_client(
     .bind(emb_origins_json)
     .bind(emb_v2)
     .bind(emb_theme)
+    .bind(req.access_ttl_seconds)
+    .bind(req.refresh_ttl_seconds)
     .execute(&state.pool)
     .await?
     .rows_affected();
@@ -854,7 +1028,9 @@ pub async fn update_client(
         actor,
         "client.update",
         Some(&id.to_string()),
-        Some(serde_json::json!({ "client_id": client_id, "allow_registration": allow_registration })),
+        Some(
+            serde_json::json!({ "client_id": client_id, "allow_registration": allow_registration }),
+        ),
     )
     .await;
 
@@ -867,8 +1043,10 @@ pub async fn rotate_client_secret(
     Extension(claims): Extension<AccessClaims>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let actor_tenant = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let actor_tenant = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let tenant_id: Uuid = if global {
         sqlx::query_scalar("SELECT tenant_id FROM clients WHERE id = $1")
             .bind(id)
@@ -883,10 +1061,12 @@ pub async fn rotate_client_secret(
             .await?
             .ok_or(AppError::NotFound)?
     };
-    let ctype: String = sqlx::query_scalar("SELECT COALESCE(client_type,'public')::text FROM clients WHERE id = $1")
-        .bind(id)
-        .fetch_one(&state.pool)
-        .await?;
+    let ctype: String = sqlx::query_scalar(
+        "SELECT COALESCE(client_type,'public')::text FROM clients WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
     if ctype != "confidential" {
         return Err(AppError::Validation(
             "only confidential OAuth clients support client_secret rotation".to_string(),
@@ -928,8 +1108,10 @@ pub async fn delete_client(
     Extension(claims): Extension<AccessClaims>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let actor_tenant = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let actor_tenant = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let tenant_id: Uuid = if global {
         sqlx::query_scalar("SELECT tenant_id FROM clients WHERE id = $1")
             .bind(id)
@@ -937,11 +1119,12 @@ pub async fn delete_client(
             .await?
             .ok_or(AppError::NotFound)?
     } else {
-        let row: Option<Uuid> = sqlx::query_scalar("SELECT tenant_id FROM clients WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(actor_tenant)
-            .fetch_optional(&state.pool)
-            .await?;
+        let row: Option<Uuid> =
+            sqlx::query_scalar("SELECT tenant_id FROM clients WHERE id = $1 AND tenant_id = $2")
+                .bind(id)
+                .bind(actor_tenant)
+                .fetch_optional(&state.pool)
+                .await?;
         row.ok_or(AppError::NotFound)?
     };
     let actor = Uuid::parse_str(&claims.sub).ok();
@@ -974,7 +1157,8 @@ pub async fn get_user(
     Path(id): Path<Uuid>,
 ) -> Result<Json<UserRow>, AppError> {
     let tenant_id = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let row = if global {
         sqlx::query(
             "SELECT id, tenant_id, email, is_active, is_locked, email_verified, totp_enabled, registration_source, created_at
@@ -1007,7 +1191,8 @@ pub async fn update_user(
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let actor_tenant = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let user_tenant: Uuid = if global {
         sqlx::query_scalar("SELECT tenant_id FROM users WHERE id = $1")
             .bind(id)
@@ -1051,10 +1236,15 @@ pub async fn patch_user(
     Json(req): Json<PatchUserRequest>,
 ) -> Result<Json<UserRow>, AppError> {
     let actor_tenant_id = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let actor = actor_user_id(&claims);
 
-    if req.email.is_none() && req.tenant_id.is_none() && req.is_locked.is_none() && req.is_active.is_none() {
+    if req.email.is_none()
+        && req.tenant_id.is_none()
+        && req.is_locked.is_none()
+        && req.is_active.is_none()
+    {
         return Err(AppError::Validation("no fields to update".to_string()));
     }
 
@@ -1199,7 +1389,8 @@ pub async fn delete_user(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let actor_tenant = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let actor = actor_user_id(&claims);
 
     let audit_tenant = if global {
@@ -1247,7 +1438,8 @@ pub async fn admin_send_verification_email(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let actor_tenant = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let actor = actor_user_id(&claims);
     let row = if global {
         sqlx::query("SELECT id, email, email_verified, tenant_id FROM users WHERE id = $1")
@@ -1267,7 +1459,9 @@ pub async fn admin_send_verification_email(
     let tenant_id: Uuid = row.get("tenant_id");
     let verified: bool = row.get("email_verified");
     if verified {
-        return Err(AppError::Validation("email is already verified".to_string()));
+        return Err(AppError::Validation(
+            "email is already verified".to_string(),
+        ));
     }
     let email: String = row.get("email");
     state.ev.resend_registration(id, tenant_id, &email).await?;
@@ -1289,7 +1483,8 @@ pub async fn admin_verify_email(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let actor_tenant = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let actor = actor_user_id(&claims);
     let user_tenant: Uuid = if global {
         sqlx::query_scalar("SELECT tenant_id FROM users WHERE id = $1")
@@ -1331,7 +1526,8 @@ pub async fn admin_reset_email_verification(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let actor_tenant = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let actor = actor_user_id(&claims);
     let user_tenant: Uuid = if global {
         sqlx::query_scalar("SELECT tenant_id FROM users WHERE id = $1")
@@ -1373,7 +1569,8 @@ pub async fn get_role(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let row = if global {
         sqlx::query("SELECT id, tenant_id, name FROM roles WHERE id = $1")
             .bind(id)
@@ -1396,7 +1593,8 @@ pub async fn update_role(
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     if !global && req.tenant_id != tid {
         return Err(AppError::Forbidden);
     }
@@ -1415,7 +1613,8 @@ pub async fn delete_role(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let n = if global {
         sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(id)
@@ -1442,7 +1641,8 @@ pub async fn get_permission(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let row = if global {
         sqlx::query("SELECT id, tenant_id, name FROM permissions WHERE id = $1")
             .bind(id)
@@ -1465,7 +1665,8 @@ pub async fn update_permission(
     Json(req): Json<CreatePermissionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     if !global && req.tenant_id != tid {
         return Err(AppError::Forbidden);
     }
@@ -1484,7 +1685,8 @@ pub async fn delete_permission(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tid = actor_tenant(&claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let n = if global {
         sqlx::query("DELETE FROM permissions WHERE id = $1")
             .bind(id)
@@ -1536,8 +1738,10 @@ pub async fn get_rbac(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<AccessClaims>,
 ) -> Result<Json<RbacResponse>, AppError> {
-    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let tenant_id = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
 
     let role_rows = if global {
         sqlx::query("SELECT id, name, tenant_id FROM roles ORDER BY tenant_id, name")
@@ -1554,7 +1758,11 @@ pub async fn get_rbac(
         roles.push(RbacEntity {
             id: row.get("id"),
             name: row.get("name"),
-            tenant_id: if global { Some(row.get("tenant_id")) } else { None },
+            tenant_id: if global {
+                Some(row.get("tenant_id"))
+            } else {
+                None
+            },
         });
     }
 
@@ -1573,7 +1781,11 @@ pub async fn get_rbac(
         permissions.push(RbacEntity {
             id: row.get("id"),
             name: row.get("name"),
-            tenant_id: if global { Some(row.get("tenant_id")) } else { None },
+            tenant_id: if global {
+                Some(row.get("tenant_id"))
+            } else {
+                None
+            },
         });
     }
 
@@ -1607,7 +1819,11 @@ pub async fn get_rbac(
             role_name: row.get("role_name"),
             permission_id: row.get("permission_id"),
             permission_name: row.get("permission_name"),
-            tenant_id: if global { Some(row.get("tenant_id")) } else { None },
+            tenant_id: if global {
+                Some(row.get("tenant_id"))
+            } else {
+                None
+            },
         });
     }
 
@@ -1640,12 +1856,12 @@ fn is_missing_relation(err: &SqlxError) -> bool {
     s.contains("auth_events") && s.contains("does not exist")
 }
 
-async fn event_metric_or_zero(
-    pool: &PgPool,
-    sql: &str,
-    tenant_id: Uuid,
-) -> Result<i64, AppError> {
-    match sqlx::query_scalar(sql).bind(tenant_id).fetch_one(pool).await {
+async fn event_metric_or_zero(pool: &PgPool, sql: &str, tenant_id: Uuid) -> Result<i64, AppError> {
+    match sqlx::query_scalar(sql)
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await
+    {
         Ok(n) => Ok(n),
         Err(e) if is_missing_relation(&e) => {
             tracing::info!(
@@ -1669,8 +1885,10 @@ pub async fn get_dashboard_stats(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<AccessClaims>,
 ) -> Result<Json<DashboardStats>, AppError> {
-    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let tenant_id = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
 
     let (user_count, oauth_clients_count, roles_count) = if global {
         let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM users")
@@ -1684,18 +1902,21 @@ pub async fn get_dashboard_stats(
             .await?;
         (user_count, oauth_clients_count, roles_count)
     } else {
-        let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM users WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .fetch_one(&state.pool)
-            .await?;
-        let oauth_clients_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM clients WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .fetch_one(&state.pool)
-            .await?;
-        let roles_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM roles WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .fetch_one(&state.pool)
-            .await?;
+        let user_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM users WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&state.pool)
+                .await?;
+        let oauth_clients_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM clients WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&state.pool)
+                .await?;
+        let roles_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM roles WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&state.pool)
+                .await?;
         (user_count, oauth_clients_count, roles_count)
     };
 
@@ -1784,14 +2005,15 @@ pub async fn list_users(
     Extension(claims): Extension<AccessClaims>,
     Query(q): Query<ListUsersQuery>,
 ) -> Result<Json<Vec<UserRow>>, AppError> {
-    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let tenant_id = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
 
-    let needle = q
-        .q
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let needle =
+        q.q.as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
     let (ord_col, ord_dir) = users_list_order_clause(q.sort.as_deref(), q.order.as_deref());
 
     let sql = if global {
@@ -1825,15 +2047,25 @@ pub async fn list_users(
     let rows = if global {
         if let Some(needle) = needle {
             let pattern = format!("%{needle}%");
-            sqlx::query(&sql).bind(pattern).fetch_all(&state.pool).await?
+            sqlx::query(&sql)
+                .bind(pattern)
+                .fetch_all(&state.pool)
+                .await?
         } else {
             sqlx::query(&sql).fetch_all(&state.pool).await?
         }
     } else if let Some(needle) = needle {
         let pattern = format!("%{needle}%");
-        sqlx::query(&sql).bind(tenant_id).bind(pattern).fetch_all(&state.pool).await?
+        sqlx::query(&sql)
+            .bind(tenant_id)
+            .bind(pattern)
+            .fetch_all(&state.pool)
+            .await?
     } else {
-        sqlx::query(&sql).bind(tenant_id).fetch_all(&state.pool).await?
+        sqlx::query(&sql)
+            .bind(tenant_id)
+            .fetch_all(&state.pool)
+            .await?
     };
 
     let mut out = Vec::with_capacity(rows.len());
@@ -1869,7 +2101,8 @@ async fn client_row_tenant_for_admin(
     client_row_id: Uuid,
 ) -> Result<Uuid, AppError> {
     let actor_tenant = actor_tenant(claims)?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, claims);
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, claims);
     if global {
         sqlx::query_scalar("SELECT tenant_id FROM clients WHERE id = $1")
             .bind(client_row_id)
@@ -1892,14 +2125,14 @@ pub async fn admin_client_user_2fa_status(
     Extension(claims): Extension<AccessClaims>,
     Path((client_row_id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let tenant_id = client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
-    let u_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)",
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let tenant_id =
+        client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
+    let u_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)")
+            .bind(user_id)
+            .bind(tenant_id)
+            .fetch_one(&state.pool)
+            .await?;
     if !u_exists {
         return Err(AppError::NotFound);
     }
@@ -1907,7 +2140,9 @@ pub async fn admin_client_user_2fa_status(
         .totp
         .is_client_totp_enabled(user_id, tenant_id, client_row_id)
         .await?;
-    Ok(Json(serde_json::json!({ "client_totp_enabled": client_totp_enabled })))
+    Ok(Json(
+        serde_json::json!({ "client_totp_enabled": client_totp_enabled }),
+    ))
 }
 
 /// POST /admin/clients/:client_row_id/users/:user_id/2fa/setup
@@ -1916,20 +2151,20 @@ pub async fn admin_client_user_2fa_setup(
     Extension(claims): Extension<AccessClaims>,
     Path((client_row_id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let tenant_id = client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
+    let tenant_id =
+        client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
     let actor = Uuid::parse_str(&claims.sub).ok();
     let public: String = sqlx::query_scalar("SELECT client_id::text FROM clients WHERE id = $1")
         .bind(client_row_id)
         .fetch_optional(&state.pool)
         .await?
         .ok_or(AppError::NotFound)?;
-    let u_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)",
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let u_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)")
+            .bind(user_id)
+            .bind(tenant_id)
+            .fetch_one(&state.pool)
+            .await?;
     if !u_exists {
         return Err(AppError::NotFound);
     }
@@ -1964,20 +2199,20 @@ pub async fn admin_client_user_2fa_verify(
     Path((client_row_id, user_id)): Path<(Uuid, Uuid)>,
     Json(b): Json<AdminClient2faCode>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let tenant_id = client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
+    let tenant_id =
+        client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
     let actor = Uuid::parse_str(&claims.sub).ok();
     let public: String = sqlx::query_scalar("SELECT client_id::text FROM clients WHERE id = $1")
         .bind(client_row_id)
         .fetch_optional(&state.pool)
         .await?
         .ok_or(AppError::NotFound)?;
-    let u_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)",
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let u_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)")
+            .bind(user_id)
+            .bind(tenant_id)
+            .fetch_one(&state.pool)
+            .await?;
     if !u_exists {
         return Err(AppError::NotFound);
     }
@@ -1994,7 +2229,9 @@ pub async fn admin_client_user_2fa_verify(
         Some(serde_json::json!({ "user_id": user_id })),
     )
     .await;
-    Ok(Json(serde_json::json!({ "ok": true, "client_totp_enabled": true })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "client_totp_enabled": true }),
+    ))
 }
 
 /// POST /admin/clients/:client_row_id/users/:user_id/2fa/disable
@@ -2004,20 +2241,20 @@ pub async fn admin_client_user_2fa_disable(
     Path((client_row_id, user_id)): Path<(Uuid, Uuid)>,
     Json(b): Json<AdminClient2faCode>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let tenant_id = client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
+    let tenant_id =
+        client_row_tenant_for_admin(&state.pool, &state, &claims, client_row_id).await?;
     let actor = Uuid::parse_str(&claims.sub).ok();
     let public: String = sqlx::query_scalar("SELECT client_id::text FROM clients WHERE id = $1")
         .bind(client_row_id)
         .fetch_optional(&state.pool)
         .await?
         .ok_or(AppError::NotFound)?;
-    let u_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)",
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let u_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)")
+            .bind(user_id)
+            .bind(tenant_id)
+            .fetch_one(&state.pool)
+            .await?;
     if !u_exists {
         return Err(AppError::NotFound);
     }
@@ -2034,5 +2271,7 @@ pub async fn admin_client_user_2fa_disable(
         Some(serde_json::json!({ "user_id": user_id })),
     )
     .await;
-    Ok(Json(serde_json::json!({ "ok": true, "client_totp_enabled": false })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "client_totp_enabled": false }),
+    ))
 }

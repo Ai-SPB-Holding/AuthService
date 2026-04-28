@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use axum::extract::Query;
-use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::{Form, Json, extract::State};
 use axum_extra::extract::CookieJar;
@@ -79,10 +79,7 @@ pub async fn token(
         .unwrap_or(&state.config.auth.admin_api_audience);
 
     let (basic_id, basic_sec) = merge_creds(&headers, None, None);
-    let client_secret_merged = payload
-        .client_secret
-        .clone()
-        .or(basic_sec);
+    let client_secret_merged = payload.client_secret.clone().or(basic_sec);
     let client_id_merged = payload.client_id.clone().or(basic_id);
 
     let creds_src = if parse_basic(&headers).is_some() {
@@ -112,7 +109,13 @@ pub async fn token(
                 .clone()
                 .unwrap_or_else(|| state.config.auth.admin_api_audience.clone());
             if let Some(ref cid) = client_id_merged {
-                client_oauth::assert_grant_allowed(&state.pool, tenant_id, cid.as_str(), "password").await?;
+                client_oauth::assert_grant_allowed(
+                    &state.pool,
+                    tenant_id,
+                    cid.as_str(),
+                    "password",
+                )
+                .await?;
             }
             let tokens = state
                 .auth
@@ -178,7 +181,9 @@ pub async fn token(
                     client_secret_merged.as_deref(),
                 )
                 .await?;
-            Ok(Json(serde_json::to_value(&tokens).map_err(|e| AppError::Internal(e.to_string()))?))
+            Ok(Json(
+                serde_json::to_value(&tokens).map_err(|e| AppError::Internal(e.to_string()))?,
+            ))
         }
         "embedded_session" => {
             let code = payload
@@ -198,7 +203,8 @@ pub async fn token(
                     creds_src,
                 )
                 .await?;
-            let mut m = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut m =
+                serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
             if let Some(obj) = m.as_object_mut() {
                 obj.insert("token_type".to_string(), json!("Bearer"));
             }
@@ -227,7 +233,8 @@ pub async fn token(
                     creds_src,
                 )
                 .await?;
-            let mut m = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut m =
+                serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
             if let Some(obj) = m.as_object_mut() {
                 obj.insert("token_type".to_string(), json!("Bearer"));
             }
@@ -274,7 +281,9 @@ pub async fn revoke(
     let token = body.get("token").cloned();
     let mut jb = json!({});
     if let Some(t) = token {
-        jb.as_object_mut().unwrap().insert("token".to_string(), json!(t));
+        jb.as_object_mut()
+            .unwrap()
+            .insert("token".to_string(), json!(t));
     }
     if let Some(cid) = body.get("client_id") {
         jb.as_object_mut()
@@ -327,7 +336,9 @@ pub async fn authorize(
     jar: CookieJar,
 ) -> Result<Response, AppError> {
     if q.response_type != "code" {
-        return Err(AppError::Validation("unsupported response_type".to_string()));
+        return Err(AppError::Validation(
+            "unsupported response_type".to_string(),
+        ));
     }
 
     if let Some(login) = &state.config.oidc.login_url {
@@ -345,7 +356,11 @@ pub async fn authorize(
 
     let c = jar.get(IDP_SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
     let tok = c.value();
-    let sess = state.auth.jwt.verify_idp_session(tok).map_err(|_| AppError::Unauthorized)?;
+    let sess = state
+        .auth
+        .jwt
+        .verify_idp_session(tok)
+        .map_err(|_| AppError::Unauthorized)?;
     let user_sub = Uuid::parse_str(&sess.sub).map_err(|_| AppError::Unauthorized)?;
     let tenant_id_sess = Uuid::parse_str(&sess.tenant_id).map_err(|_| AppError::Unauthorized)?;
 
@@ -391,7 +406,8 @@ pub async fn authorize(
                 .await?;
             if !ok {
                 return Err(AppError::Validation(
-                    "2FA (Authenticator) is required for this client before authorization".to_string(),
+                    "2FA (Authenticator) is required for this client before authorization"
+                        .to_string(),
                 ));
             }
         }
@@ -427,7 +443,8 @@ pub async fn authorize(
         )
         .await?;
 
-    let mut u = Url::parse(&q.redirect_uri).map_err(|_| AppError::Validation("invalid redirect_uri url".to_string()))?;
+    let mut u = Url::parse(&q.redirect_uri)
+        .map_err(|_| AppError::Validation("invalid redirect_uri url".to_string()))?;
     u.query_pairs_mut().append_pair("code", &code);
     if let Some(ref s) = q.state {
         u.query_pairs_mut().append_pair("state", s);

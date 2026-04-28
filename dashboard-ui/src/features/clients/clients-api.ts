@@ -24,6 +24,8 @@ export type ClientWritePayload = {
   embedded_parent_origins?: string[];
   embedded_protocol_v2?: boolean;
   embedded_ui_theme?: object;
+  access_ttl_seconds?: number | null;
+  refresh_ttl_seconds?: number | null;
 };
 
 export type CreateClientResponse = {
@@ -32,6 +34,8 @@ export type CreateClientResponse = {
   client_id: string;
   client_type: "public" | "confidential";
   allow_user_registration: boolean;
+  /** `GET {issuer}/.well-known/openid-configuration` for SDK / OIDC clients. */
+  server_metadata_url: string;
   client_secret?: string;
   message?: string;
 };

@@ -53,6 +53,7 @@ Production-oriented Auth/IAM service with Axum + SQLx + Redis and OIDC-compatibl
 
 ## Security
 
+- Automated checks (SCA, SAST, secrets, ZAP baseline, Trivy images, header smoke): see [test/README.md](test/README.md) and run `make -f Makefile.test help`.
 - Argon2 password hashing; OAuth **client** secrets stored as Argon2 hashes
 - RS256 access / refresh / ID token; `jti` on access; refresh rotation + family reuse detection
 - Admin API requires `aud` = `AUTH__ADMIN_API_AUDIENCE` (e.g. `auth-service`)

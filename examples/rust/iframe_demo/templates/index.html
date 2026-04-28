@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="origin-when-cross-origin" />
+  <title>Iframe login — __CLIENT_LABEL__</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    .meta { color: #555; font-size: 0.9rem; }
+    iframe { width: 100%; min-height: 380px; border: 1px solid #ccc; border-radius: 8px; }
+    .err { color: #b00020; margin-top: 0.5rem; }
+    nav a { margin-right: 1rem; }
+    .toolbar { display: flex; gap: 0.5rem; margin: 0.75rem 0 0.5rem; }
+    .toolbar button { border: 1px solid #bbb; background: #f8f8f8; border-radius: 6px; padding: 0.45rem 0.7rem; cursor: pointer; }
+    .toolbar button:hover { background: #efefef; }
+  </style>
+</head>
+<body
+  data-auth-origin="__IFRAME_ORIGIN__"
+  data-client-id="__OAUTH_CLIENT_ID__"
+  data-callback-url="__CALLBACK_URL__"
+>
+  <nav>
+    <a href="/">Login</a>
+    <a href="/register">Register</a>
+    <a href="/profile">Profile</a>
+  </nav>
+  <h1>Embedded login (__CLIENT_LABEL__)</h1>
+  <p class="meta">OAuth <code>client_id</code>: <strong>__OAUTH_CLIENT_ID__</strong> __CONFIDENTIAL_NOTE__</p>
+  <p class="meta">Auth UI origin (postMessage + iframe): <code>__IFRAME_ORIGIN__</code></p>
+  <p class="meta" style="background:#fff8e6;padding:0.75rem;border-radius:8px;font-size:0.85rem;">
+    <strong>Parent origins (admin → OAuth client):</strong> add <code>http://localhost:__LISTEN_PORT__</code>
+    <em>and</em> <code>http://127.0.0.1:__LISTEN_PORT__</code>, plus <code>__IFRAME_ORIGIN__</code>.
+  </p>
+  <div class="toolbar">
+    <button id="btnDefaultTheme" type="button">Server default theme</button>
+    <button id="btnCustomTheme" type="button">Client custom theme</button>
+  </div>
+  <p id="status" class="err" role="status"></p>
+  <div id="authMount"></div>
+  <script src="/static/embedded-auth-sdk-demo.js"></script>
+  <script>
+    (function () {
+      var pageData = document.body.dataset;
+      var statusEl = document.getElementById("status");
+      var mount = document.getElementById("authMount");
+      var authOrigin = String(pageData.authOrigin || "");
+      var callbackUrl = String(pageData.callbackUrl || "");
+      var clientId = String(pageData.clientId || "");
+      function loopbackAuthOrigins(primary) {
+        try {
+          var u = new URL(primary);
+          var h = (u.hostname || "").toLowerCase();
+          if (h !== "localhost" && h !== "127.0.0.1") return [primary];
+          var port = u.port ? ":" + u.port : "";
+          return [
+            u.protocol + "//localhost" + port,
+            u.protocol + "//127.0.0.1" + port,
+          ];
+        } catch (e) {
+          return [primary];
+        }
+      }
+      var sdk = window.EmbeddedAuthSdkDemo.createEmbeddedAuth({
+        issuer: authOrigin,
+        clientId: clientId,
+        allowedMessageOrigins: loopbackAuthOrigins(authOrigin),
+        onReady: function () { sdk.initHandshake(); },
+        onError: function (e) {
+          statusEl.textContent = "Auth error: " + (e.error || "unknown");
+        },
+        onSuccess: function (tokens) {
+          if (!tokens || !tokens.access_token) return;
+          statusEl.textContent = "Saving session…";
+          fetch(callbackUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              access_token: tokens.access_token,
+              refresh_token: tokens.refresh_token || null,
+            }),
+          })
+            .then(function (r) { return r.json(); })
+            .then(function (body) {
+              if (body && body.ok && body.redirect) {
+                window.location.href = body.redirect;
+              } else {
+                statusEl.textContent = "Callback failed: " + JSON.stringify(body);
+              }
+            })
+            .catch(function (e) {
+              statusEl.textContent = "Callback error: " + e;
+            });
+        },
+      });
+      mount.appendChild(sdk.iframe);
+      sdk.load();
+      document.getElementById("btnDefaultTheme").onclick = function () {
+        sdk.updateTheme({ preset: "server_default" });
+      };
+      document.getElementById("btnCustomTheme").onclick = function () {
+        sdk.updateTheme({
+          preset: "client_custom",
+          logo_url: "",
+          primary: "#2563eb",
+          background: "#f8fafc",
+        });
+      };
+    })();
+  </script>
+</body>
+</html>

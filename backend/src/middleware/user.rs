@@ -38,7 +38,9 @@ pub async fn require_bearer_user_or_totp_enroll(
     }
 
     if let Ok(c) = state.auth.jwt.verify_totp_enrollment(token) {
-        request.extensions_mut().insert(BearerPrincipal::TotpEnroll(c));
+        request
+            .extensions_mut()
+            .insert(BearerPrincipal::TotpEnroll(c));
         return Ok(next.run(request).await);
     }
     let claims = state.auth.jwt.verify_access_any_audience(token)?;

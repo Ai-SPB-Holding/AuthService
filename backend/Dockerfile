@@ -5,7 +5,10 @@ COPY src ./src
 RUN cargo build --release
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates wget && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+	&& apt-get upgrade -y \
+	&& apt-get install -y --no-install-recommends ca-certificates wget \
+	&& rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/auth_service /usr/local/bin/auth_service
 EXPOSE 8080

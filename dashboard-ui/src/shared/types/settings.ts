@@ -9,6 +9,14 @@ export type ServiceSettings = {
   totp_encryption_key_b64_set: boolean;
   env_file_path: string;
   restart_required_note?: string | null;
+  /** `AUTH__ACCESS_TTL_SECONDS` — default when per-client access TTL is unset. */
+  default_access_ttl_seconds: number;
+  /** `AUTH__REFRESH_TTL_SECONDS` — default when per-client refresh TTL is unset. */
+  default_refresh_ttl_seconds: number;
+  /** `AUTH__MAX_CLIENT_ACCESS_TTL_SECONDS` */
+  max_client_access_ttl_seconds: number;
+  /** `AUTH__MAX_CLIENT_REFRESH_TTL_SECONDS` */
+  max_client_refresh_ttl_seconds: number;
 };
 
 export type AdminSessionInfo = {

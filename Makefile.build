@@ -1,0 +1,91 @@
+SHELL := /usr/bin/env bash
+.SHELLFLAGS := -euo pipefail -c
+
+APP_NAME ?= authservice
+DIST_DIR ?= dist
+PKG_NAME ?= $(APP_NAME)
+PKG_DIR  ?= $(DIST_DIR)/$(PKG_NAME)
+
+# Cross-build (Linux) options
+LINUX_ARCH ?= amd64 # amd64|arm64
+LINUX_PLATFORM_amd64 := linux/amd64
+LINUX_PLATFORM_arm64 := linux/arm64
+LINUX_PLATFORM := $(LINUX_PLATFORM_$(LINUX_ARCH))
+
+DOCKER_RUST_IMAGE ?= rust:1.88-bookworm
+
+# Frontend build-time env (Vite)
+VITE_API_BASE_URL ?= /api
+VITE_SSE_URL ?= /events
+VITE_APP_NAME ?= Auth Admin
+
+.PHONY: help clean build-backend build-frontend package archive build \
+	build-backend-linux package-linux archive-linux build-linux
+
+help:
+	@echo "Release build (no docker files in output):"
+	@echo "  make -f Makefile.build build"
+	@echo "  make -f Makefile.build build-linux LINUX_ARCH=amd64|arm64"
+	@echo "  make -f Makefile.build clean"
+	@echo
+	@echo "Outputs:"
+	@echo "  $(PKG_DIR)/            # release folder"
+	@echo "  $(DIST_DIR)/$(APP_NAME).tar.gz"
+
+clean:
+	rm -rf "$(DIST_DIR)"
+
+build-backend:
+	cd backend && cargo build --release --target-dir target-release
+
+build-backend-linux:
+	@if [ -z "$(LINUX_PLATFORM)" ]; then echo "Invalid LINUX_ARCH=$(LINUX_ARCH) (use amd64 or arm64)"; exit 1; fi
+	docker run --rm --platform "$(LINUX_PLATFORM)" \
+		-v "$$PWD/backend:/app" -w /app \
+		"$(DOCKER_RUST_IMAGE)" bash -c '\
+			set -euo pipefail; \
+			/usr/local/cargo/bin/cargo build --release --target-dir target-release-linux-$(LINUX_ARCH); \
+		'
+
+build-frontend:
+	cd dashboard-ui && npm ci
+	cd dashboard-ui && VITE_API_BASE_URL="$(VITE_API_BASE_URL)" VITE_SSE_URL="$(VITE_SSE_URL)" VITE_APP_NAME="$(VITE_APP_NAME)" npm run build
+
+package: clean build-backend build-frontend
+	mkdir -p "$(PKG_DIR)/bin" "$(PKG_DIR)/frontend" "$(PKG_DIR)/config" "$(PKG_DIR)/scripts"
+	cp "backend/target-release/release/auth_service" "$(PKG_DIR)/bin/auth_service"
+	cp -R "backend/migrations" "$(PKG_DIR)/migrations"
+	cp -R "dashboard-ui/dist/." "$(PKG_DIR)/frontend/"
+	cp "dashboard-ui/nginx/default.conf" "$(PKG_DIR)/config/nginx.conf"
+	cp ".env.example" "$(PKG_DIR)/.env.example"
+	cp "Makefile.release" "$(PKG_DIR)/Makefile"
+	cp "run.sh" "$(PKG_DIR)/run.sh"
+	cp "init-env.sh" "$(PKG_DIR)/init-env.sh"
+	cp "scripts/server-check.sh" "$(PKG_DIR)/scripts/server-check.sh"
+	chmod +x "$(PKG_DIR)/run.sh" "$(PKG_DIR)/init-env.sh" "$(PKG_DIR)/scripts/server-check.sh"
+
+archive: package
+	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(PKG_NAME).tar.gz" "$(PKG_NAME)"
+
+build: archive
+
+package-linux: PKG_NAME := $(APP_NAME)-linux-$(LINUX_ARCH)
+package-linux: clean build-backend-linux build-frontend
+	mkdir -p "$(PKG_DIR)/bin" "$(PKG_DIR)/frontend" "$(PKG_DIR)/config" "$(PKG_DIR)/scripts"
+	cp "backend/target-release-linux-$(LINUX_ARCH)/release/auth_service" "$(PKG_DIR)/bin/auth_service"
+	cp -R "backend/migrations" "$(PKG_DIR)/migrations"
+	cp -R "dashboard-ui/dist/." "$(PKG_DIR)/frontend/"
+	cp "dashboard-ui/nginx/default.conf" "$(PKG_DIR)/config/nginx.conf"
+	cp ".env.example" "$(PKG_DIR)/.env.example"
+	cp "Makefile.release" "$(PKG_DIR)/Makefile"
+	cp "run.sh" "$(PKG_DIR)/run.sh"
+	cp "init-env.sh" "$(PKG_DIR)/init-env.sh"
+	cp "scripts/server-check.sh" "$(PKG_DIR)/scripts/server-check.sh"
+	chmod +x "$(PKG_DIR)/run.sh" "$(PKG_DIR)/init-env.sh" "$(PKG_DIR)/scripts/server-check.sh"
+
+archive-linux: PKG_NAME := $(APP_NAME)-linux-$(LINUX_ARCH)
+archive-linux: package-linux
+	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(PKG_NAME).tar.gz" "$(PKG_NAME)"
+
+build-linux: PKG_NAME := $(APP_NAME)-linux-$(LINUX_ARCH)
+build-linux: archive-linux

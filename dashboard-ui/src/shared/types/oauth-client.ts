@@ -34,4 +34,8 @@ export type OAuthClientRow = {
   require_pkce?: boolean;
   embedded_flow_mode?: "code_exchange" | "bff_cookie" | "legacy_postmessage" | string;
   use_v2_endpoints_only?: boolean;
+  /** Override access JWT lifetime (seconds); omit / null = server `AUTH__ACCESS_TTL_SECONDS`. */
+  access_ttl_seconds?: number | null;
+  /** Override refresh token lifetime (seconds); omit / null = server `AUTH__REFRESH_TTL_SECONDS`. */
+  refresh_ttl_seconds?: number | null;
 };

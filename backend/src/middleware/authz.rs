@@ -9,15 +9,17 @@ use crate::security::jwt::AccessClaims;
 
 /// Returns true if the token includes `permission` or the user has the `admin` role.
 pub fn access_has_permission(claims: &AccessClaims, permission: &str) -> bool {
-    claims.roles.iter().any(|r| r == "admin")
-        || claims.permissions.iter().any(|p| p == permission)
+    claims.roles.iter().any(|r| r == "admin") || claims.permissions.iter().any(|p| p == permission)
 }
 
 pub fn access_has_any_role(claims: &AccessClaims, roles: &[&str]) -> bool {
     claims.roles.iter().any(|r| roles.iter().any(|x| x == r))
 }
 
-pub fn require_permission(claims: &AccessClaims, permission: &str) -> Result<(), crate::services::errors::AppError> {
+pub fn require_permission(
+    claims: &AccessClaims,
+    permission: &str,
+) -> Result<(), crate::services::errors::AppError> {
     if access_has_permission(claims, permission) {
         Ok(())
     } else {

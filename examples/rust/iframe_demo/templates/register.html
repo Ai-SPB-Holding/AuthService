@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Register — __CLIENT_LABEL__</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    nav a { margin-right: 1rem; }
+    .note { background: #fff8e6; padding: 1rem; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/">Login</a>
+    <a href="/register">Register</a>
+    <a href="/profile">Profile</a>
+  </nav>
+  <h1>Register (negative test)</h1>
+  <div class="note">
+    <p>This page does <strong>not</strong> perform real registration.</p>
+    <p>Calling <code>POST /auth/register</code> without an admin Bearer token returns 401/403 (same as the Python demo).</p>
+    <p>Use the iframe <strong>Register</strong> tab on the <a href="/">login page</a> for end-user sign-up (<code>POST /api/register</code>).</p>
+  </div>
+</body>
+</html>

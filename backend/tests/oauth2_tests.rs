@@ -3,14 +3,18 @@
 use auth_service::repositories::user_repository::PostgresUserRepository;
 use auth_service::security::jwt::AccessClaims;
 use auth_service::services::auth_service::AuthService;
-use auth_service::services::client_oauth::{enforce_token_endpoint_auth_method, ClientCredentialsSource};
+use auth_service::services::client_oauth::{
+    ClientCredentialsSource, enforce_token_endpoint_auth_method,
+};
 use auth_service::services::errors::AppError;
 
 #[test]
 fn pkce_s256_roundtrip() {
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-    assert!(AuthService::<PostgresUserRepository>::verify_pkce_s256(verifier, challenge));
+    assert!(AuthService::<PostgresUserRepository>::verify_pkce_s256(
+        verifier, challenge
+    ));
 }
 
 #[test]
@@ -30,12 +34,14 @@ fn access_claims_email_verified_defaults_false_when_omitted() {
 
 #[test]
 fn token_endpoint_auth_method_basic_requires_basic_header() {
-    assert!(enforce_token_endpoint_auth_method(
-        "client_secret_basic",
-        true,
-        ClientCredentialsSource::BasicHeader
-    )
-    .is_ok());
+    assert!(
+        enforce_token_endpoint_auth_method(
+            "client_secret_basic",
+            true,
+            ClientCredentialsSource::BasicHeader
+        )
+        .is_ok()
+    );
     let err = enforce_token_endpoint_auth_method(
         "client_secret_basic",
         true,
@@ -47,12 +53,14 @@ fn token_endpoint_auth_method_basic_requires_basic_header() {
 
 #[test]
 fn token_endpoint_auth_method_post_requires_post_body() {
-    assert!(enforce_token_endpoint_auth_method(
-        "client_secret_post",
-        true,
-        ClientCredentialsSource::PostBody
-    )
-    .is_ok());
+    assert!(
+        enforce_token_endpoint_auth_method(
+            "client_secret_post",
+            true,
+            ClientCredentialsSource::PostBody
+        )
+        .is_ok()
+    );
     let err = enforce_token_endpoint_auth_method(
         "client_secret_post",
         true,

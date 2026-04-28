@@ -21,7 +21,11 @@ pub trait UserRepository: Send + Sync {
         password_hash: &str,
         registration_source: &str,
     ) -> Result<User, AppError>;
-    async fn find_with_credential(&self, tenant_id: Uuid, email: &str) -> Result<Option<UserWithCredential>, AppError>;
+    async fn find_with_credential(
+        &self,
+        tenant_id: Uuid,
+        email: &str,
+    ) -> Result<Option<UserWithCredential>, AppError>;
 }
 
 #[derive(Clone)]
@@ -34,7 +38,12 @@ impl PostgresUserRepository {
         Self { pool }
     }
 
-    pub async fn set_email_verified(&self, user_id: Uuid, tenant_id: Uuid, v: bool) -> Result<(), AppError> {
+    pub async fn set_email_verified(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        v: bool,
+    ) -> Result<(), AppError> {
         sqlx::query("UPDATE users SET email_verified = $1 WHERE id = $2 AND tenant_id = $3")
             .bind(v)
             .bind(user_id)
@@ -148,12 +157,14 @@ impl UserRepository for PostgresUserRepository {
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query("INSERT INTO credentials (user_id, tenant_id, password_hash) VALUES ($1, $2, $3)")
-            .bind(user_id)
-            .bind(tenant_id)
-            .bind(password_hash)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO credentials (user_id, tenant_id, password_hash) VALUES ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(password_hash)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
 
@@ -169,7 +180,11 @@ impl UserRepository for PostgresUserRepository {
         })
     }
 
-    async fn find_with_credential(&self, tenant_id: Uuid, email: &str) -> Result<Option<UserWithCredential>, AppError> {
+    async fn find_with_credential(
+        &self,
+        tenant_id: Uuid,
+        email: &str,
+    ) -> Result<Option<UserWithCredential>, AppError> {
         let row = sqlx::query(
             "SELECT u.id, u.tenant_id, u.email, u.is_active, u.is_locked, u.email_verified, u.totp_enabled,
                     u.registration_source, u.totp_secret_enc, c.password_hash

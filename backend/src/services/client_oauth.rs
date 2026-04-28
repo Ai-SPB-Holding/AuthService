@@ -72,7 +72,10 @@ pub fn enforce_token_endpoint_auth_method(
 }
 
 /// Rows with the same public `client_id` across tenants; authenticate with optional secret.
-pub async fn clients_by_public_id(pool: &PgPool, client_id: &str) -> Result<Vec<sqlx::postgres::PgRow>, AppError> {
+pub async fn clients_by_public_id(
+    pool: &PgPool,
+    client_id: &str,
+) -> Result<Vec<sqlx::postgres::PgRow>, AppError> {
     let rows = sqlx::query(
         "SELECT id, tenant_id, client_id, client_type, token_endpoint_auth_method, client_secret_argon2,
                 COALESCE(require_pkce, true) AS require_pkce, pkce_methods
@@ -100,7 +103,8 @@ pub fn pick_client_row_authenticated<'a>(
         .collect();
     if sec.is_none() && public_no_secret.len() > 1 {
         return Err(AppError::Validation(
-            "multiple OAuth clients share this client_id; use a unique client_id per tenant".to_string(),
+            "multiple OAuth clients share this client_id; use a unique client_id per tenant"
+                .to_string(),
         ));
     }
     for row in rows {
@@ -139,11 +143,7 @@ pub async fn resolve_introspect_client(
     let method: String = row
         .try_get::<String, _>("token_endpoint_auth_method")
         .unwrap_or_else(|_| "none".to_string());
-    enforce_token_endpoint_auth_method(
-        method.as_str(),
-        ctype == "confidential",
-        source,
-    )?;
+    enforce_token_endpoint_auth_method(method.as_str(), ctype == "confidential", source)?;
     Ok(())
 }
 
@@ -189,7 +189,9 @@ pub fn authorize_pkce_ok(
         return Ok(());
     }
     if code_challenge_method.as_deref() != Some("S256") {
-        return Err(AppError::Validation("pkce S256 is required for this client".to_string()));
+        return Err(AppError::Validation(
+            "pkce S256 is required for this client".to_string(),
+        ));
     }
     let ch = code_challenge
         .map(str::trim)

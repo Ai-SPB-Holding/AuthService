@@ -1,0 +1,29 @@
+[package]
+name = "iframe-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Iframe embedded-login demo (parity with examples/python)"
+
+[[bin]]
+name = "iframe-client-9999"
+path = "src/bin/iframe_client_9999.rs"
+
+[[bin]]
+name = "iframe-client-9898"
+path = "src/bin/iframe_client_9898.rs"
+
+[dependencies]
+authservice-sdk = { path = "../../../AAuthLib/authservice-sdk" }
+axum = { version = "0.7", features = ["macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+secrecy = "0.10"

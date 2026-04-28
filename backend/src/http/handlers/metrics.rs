@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
 use axum::response::IntoResponse;
 use prometheus::{Encoder, TextEncoder};
 
@@ -27,7 +27,11 @@ pub async fn metrics(
     let mut buffer = Vec::new();
 
     if encoder.encode(&metric_families, &mut buffer).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "failed to encode metrics").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode metrics",
+        )
+            .into_response();
     }
 
     (

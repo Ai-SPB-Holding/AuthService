@@ -5,7 +5,10 @@ pub const DEFAULT_DASHBOARD: &str = "dashboard";
 
 /// Trims, length cap, rejects control characters.
 pub fn parse_registration_source(input: Option<&str>, default: &str) -> Result<String, String> {
-    let s = input.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(default);
+    let s = input
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default);
     if s.is_empty() {
         return Ok(default.to_string());
     }

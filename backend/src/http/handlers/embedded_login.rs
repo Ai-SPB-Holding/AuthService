@@ -4,11 +4,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::header::{HOST, ORIGIN, REFERER, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::Json;
 use redis::AsyncCommands;
 use serde::Deserialize;
 use serde_json::json;
@@ -259,23 +259,22 @@ fn build_frame_ancestors_csp(include_self: bool, origins: &[String]) -> String {
     format!("frame-ancestors {}", parts.join(" "))
 }
 
-fn csrf_redis_key(token: &str) -> String {
-    format!("embedded_csrf:{token}")
+fn csrf_redis_key(state: &AppState, token: &str) -> String {
+    state.config.redis.key(&format!("embedded_csrf:{token}"))
 }
 
-fn ip_limit_redis_key(ip: &str) -> String {
-    format!("embedded_login:ip:{ip}")
+fn ip_limit_redis_key(state: &AppState, ip: &str) -> String {
+    state.config.redis.key(&format!("embedded_login:ip:{ip}"))
 }
 
-fn client_ip(headers: &HeaderMap, conn: Option<SocketAddr>) -> String {
-    if let Some(xff) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(first) = xff.split(',').next() {
-            let t = first.trim();
-            if !t.is_empty() {
-                return t.to_string();
+fn client_ip(headers: &HeaderMap, conn: Option<SocketAddr>, trust_x_forwarded_for: bool) -> String {
+    if trust_x_forwarded_for {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = xff.split(',').next() {
+                let t = first.trim();
+                if !t.is_empty() {
+                    return t.to_string();
+                }
             }
         }
     }
@@ -283,7 +282,10 @@ fn client_ip(headers: &HeaderMap, conn: Option<SocketAddr>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-async fn resolve_embedded_client(pool: &sqlx::PgPool, public_client_id: &str) -> Result<EmbeddedResolve, AppError> {
+async fn resolve_embedded_client(
+    pool: &sqlx::PgPool,
+    public_client_id: &str,
+) -> Result<EmbeddedResolve, AppError> {
     let row = sqlx::query(
         "SELECT id, tenant_id, client_id,
                 COALESCE(embedded_login_enabled, false) AS embedded_login_enabled,
@@ -328,9 +330,8 @@ async fn resolve_embedded_client(pool: &sqlx::PgPool, public_client_id: &str) ->
     let mfa_policy: String = row
         .try_get::<String, _>("mfa_policy")
         .unwrap_or_else(|_| "off".to_string());
-    let allow_client_totp_enrollment: bool = row
-        .try_get("allow_client_totp_enrollment")
-        .unwrap_or(true);
+    let allow_client_totp_enrollment: bool =
+        row.try_get("allow_client_totp_enrollment").unwrap_or(true);
     let protocol_v2: bool = row.try_get("embedded_protocol_v2").unwrap_or(false);
     let ui_theme: Option<serde_json::Value> = row
         .try_get::<serde_json::Value, _>("embedded_ui_theme")
@@ -357,12 +358,20 @@ fn json_err(code: &str, status: StatusCode, message: &str) -> Response {
 
 fn map_app_error(e: AppError) -> Response {
     match e {
-        AppError::Unauthorized => json_err("INVALID_CREDENTIALS", StatusCode::UNAUTHORIZED, "invalid credentials"),
+        AppError::Unauthorized => json_err(
+            "INVALID_CREDENTIALS",
+            StatusCode::UNAUTHORIZED,
+            "invalid credentials",
+        ),
         AppError::Forbidden => json_err("FORBIDDEN", StatusCode::FORBIDDEN, "forbidden"),
         AppError::ForbiddenWithReason(msg) => json_err("FORBIDDEN", StatusCode::FORBIDDEN, &msg),
         AppError::NotFound => json_err("NOT_FOUND", StatusCode::NOT_FOUND, "not found"),
         AppError::Validation(msg) => json_err("VALIDATION_ERROR", StatusCode::BAD_REQUEST, &msg),
-        _ => json_err("INTERNAL_ERROR", StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        _ => json_err(
+            "INTERNAL_ERROR",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        ),
     }
 }
 
@@ -376,7 +385,7 @@ async fn delete_embedded_csrf_redis(state: &Arc<AppState>, csrf_token: &str) {
     if t.is_empty() {
         return;
     }
-    let key = csrf_redis_key(t);
+    let key = csrf_redis_key(state.as_ref(), t);
     let mut r = state.auth.redis.clone();
     let _: Result<(), _> = r.del::<_, ()>(&key).await;
 }
@@ -401,7 +410,11 @@ fn cookie_csrf_token(headers: &HeaderMap) -> Option<String> {
 fn map_embedded_register_error(e: AppError) -> Response {
     match e {
         AppError::Validation(msg) => json_err("VALIDATION_ERROR", StatusCode::BAD_REQUEST, &msg),
-        AppError::Unauthorized => json_err("VERIFY_TOKEN_INVALID", StatusCode::UNAUTHORIZED, "invalid or expired verification token"),
+        AppError::Unauthorized => json_err(
+            "VERIFY_TOKEN_INVALID",
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired verification token",
+        ),
         AppError::Database(ref err) => {
             if let Some(db) = err.as_database_error() {
                 if db.code().as_deref() == Some("23505") {
@@ -424,7 +437,7 @@ async fn check_ip_limit(state: &AppState, ip: &str) -> Result<(), Response> {
         return Ok(());
     }
     let win = state.config.auth.embedded_login_ip_window_seconds.max(1);
-    let key = ip_limit_redis_key(ip);
+    let key = ip_limit_redis_key(state, ip);
     let mut r = state.auth.redis.clone();
     let n: i64 = r.incr(&key, 1).await.map_err(|_| {
         json_err(
@@ -456,7 +469,11 @@ async fn validate_embedded_csrf_and_origin(
     csrf_body: &str,
     consume_csrf: bool,
 ) -> Result<EmbeddedValidated, Response> {
-    let ip = client_ip(headers, conn);
+    let ip = client_ip(
+        headers,
+        conn,
+        state.config.auth.trust_x_forwarded_for,
+    );
     if let Err(resp) = check_ip_limit(state, &ip).await {
         return Err(resp);
     }
@@ -487,7 +504,7 @@ async fn validate_embedded_csrf_and_origin(
     }
 
     let mut rconn = state.auth.redis.clone();
-    let key = csrf_redis_key(&ct);
+    let key = csrf_redis_key(state.as_ref(), &ct);
     let bound: Option<String> = rconn.get(&key).await.map_err(|_| {
         json_err(
             "INTERNAL_ERROR",
@@ -512,13 +529,15 @@ async fn validate_embedded_csrf_and_origin(
         ));
     }
 
-    let ec = match resolve_embedded_client(&state.pool, client_id).await.map_err(|_| {
-        json_err(
-            "INTERNAL_ERROR",
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "database error",
-        )
-    })? {
+    let ec = match resolve_embedded_client(&state.pool, client_id)
+        .await
+        .map_err(|_| {
+            json_err(
+                "INTERNAL_ERROR",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database error",
+            )
+        })? {
         EmbeddedResolve::UnknownClient => {
             return Err(json_err(
                 "UNKNOWN_CLIENT",
@@ -611,7 +630,10 @@ pub async fn embedded_login_page(
         let reported_dbg = reported
             .as_deref()
             .map(escape_html_text)
-            .unwrap_or_else(|| "(none — open the auth page only inside your app’s iframe, not in a new tab)".to_string());
+            .unwrap_or_else(|| {
+                "(none — open the auth page only inside your app’s iframe, not in a new tab)"
+                    .to_string()
+            });
         let origins_list = ec
             .parent_origins
             .iter()
@@ -639,15 +661,12 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
         state.config.auth.embedded_csp_include_self,
         &ec.parent_origins,
     );
-    let csp_h = HeaderValue::from_str(&csp).map_err(|_| AppError::Internal("invalid CSP".to_string()))?;
+    let csp_h =
+        HeaderValue::from_str(&csp).map_err(|_| AppError::Internal("invalid CSP".to_string()))?;
 
-    let csrf = format!(
-        "{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    );
+    let csrf = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let mut rconn = state.auth.redis.clone();
-    let key = csrf_redis_key(&csrf);
+    let key = csrf_redis_key(state.as_ref(), &csrf);
     let _: () = rconn
         .set_ex(&key, ec.client_id.as_str(), CSRF_TTL_SECS as u64)
         .await?;
@@ -1537,13 +1556,11 @@ pub async fn embedded_register_api(
 
 fn map_verify_complete_error(e: AppError) -> Response {
     match e {
-        AppError::Validation(_) | AppError::Unauthorized => {
-            json_err(
-                "VERIFY_CODE_INVALID",
-                StatusCode::BAD_REQUEST,
-                "invalid or expired verification code",
-            )
-        }
+        AppError::Validation(_) | AppError::Unauthorized => json_err(
+            "VERIFY_CODE_INVALID",
+            StatusCode::BAD_REQUEST,
+            "invalid or expired verification code",
+        ),
         AppError::Forbidden => json_err(
             "VERIFY_LOCKED",
             StatusCode::FORBIDDEN,
@@ -1625,19 +1642,27 @@ pub async fn embedded_register_verify_email(
 
         if let Err(e) = state
             .ev
-            .complete_embedded_pending_email(pending_id, tenant_id, verification_id, body.code.trim())
+            .complete_embedded_pending_email(
+                pending_id,
+                tenant_id,
+                verification_id,
+                body.code.trim(),
+            )
             .await
         {
             return Ok(map_verify_complete_error(e));
         }
 
-        let (enroll_jwt, exp) = state.auth.jwt.mint_embedded_pending_client_totp_enrollment(
-            pending_id,
-            tenant_id,
-            &ec.token_audience,
-            ec.client_row_id,
-            &ec.client_id,
-        )?;
+        let (enroll_jwt, exp) = state
+            .auth
+            .jwt
+            .mint_embedded_pending_client_totp_enrollment(
+                pending_id,
+                tenant_id,
+                &ec.token_audience,
+                ec.client_row_id,
+                &ec.client_id,
+            )?;
 
         return Ok(Json(json!({
             "client_totp_enrollment_required": true,
@@ -1822,14 +1847,13 @@ pub async fn embedded_register_resend_code(
         ));
     }
 
-    let email: Option<String> = sqlx::query_scalar(
-        "SELECT email FROM users WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    let email: Option<String> =
+        sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(user_id)
+            .bind(tenant_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let Some(email) = email else {
         return Ok(json_err(
@@ -1839,7 +1863,10 @@ pub async fn embedded_register_resend_code(
         ));
     };
 
-    let (jwt, exp) = state.ev.resend_registration(user_id, tenant_id, &email).await?;
+    let (jwt, exp) = state
+        .ev
+        .resend_registration(user_id, tenant_id, &email)
+        .await?;
 
     Ok(Json(json!({
         "email_verification_token": jwt,
@@ -2034,7 +2061,12 @@ pub async fn embedded_register_client_totp_verify(
 
     let pair = match state
         .auth
-        .finalize_embedded_pending_registration(pending_id, tenant_id, &ec.token_audience, oauth_row)
+        .finalize_embedded_pending_registration(
+            pending_id,
+            tenant_id,
+            &ec.token_audience,
+            oauth_row,
+        )
         .await
     {
         Ok(p) => p,
@@ -2113,7 +2145,11 @@ pub async fn embedded_login_resend_cte_email(
         Err(resp) => return Ok(resp),
     };
 
-    let c = match state.auth.jwt.verify_email_verification(body.email_verification_token.trim()) {
+    let c = match state
+        .auth
+        .jwt
+        .verify_email_verification(body.email_verification_token.trim())
+    {
         Ok(c) => c,
         Err(_) => {
             return Ok(json_err(
@@ -2150,17 +2186,22 @@ pub async fn embedded_login_resend_cte_email(
             "email token does not match this client",
         ));
     }
-    let email: String = match sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-        .bind(user_id)
-        .bind(tenant_id)
-        .fetch_optional(&state.pool)
-        .await?
-    {
-        Some(e) => e,
-        None => {
-            return Ok(json_err("NOT_FOUND", StatusCode::NOT_FOUND, "user not found"));
-        }
-    };
+    let email: String =
+        match sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(user_id)
+            .bind(tenant_id)
+            .fetch_optional(&state.pool)
+            .await?
+        {
+            Some(e) => e,
+            None => {
+                return Ok(json_err(
+                    "NOT_FOUND",
+                    StatusCode::NOT_FOUND,
+                    "user not found",
+                ));
+            }
+        };
     if !ec.allow_client_totp_enrollment || ec.mfa_policy != "required" {
         return Ok(json_err(
             "REGISTRATION_DISABLED",
@@ -2294,7 +2335,10 @@ pub async fn embedded_login_client_totp_enroll_verify(
 
     let pair = match state
         .auth
-        .client_totp_enroll_verify_after_email_bearer(body.enrollment_token.trim(), body.code.trim())
+        .client_totp_enroll_verify_after_email_bearer(
+            body.enrollment_token.trim(),
+            body.code.trim(),
+        )
         .await
     {
         Ok(p) => p,
@@ -2314,4 +2358,37 @@ pub async fn embedded_login_client_totp_enroll_verify(
 
     let v = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(v).into_response())
+}
+
+#[cfg(test)]
+mod client_ip_unit_tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use axum::http::HeaderName;
+
+    use super::*;
+
+    #[test]
+    fn client_ip_ignores_xff_when_untrusted() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("9.9.9.9"),
+        );
+        let conn = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 1234));
+        let ip = client_ip(&h, conn, false);
+        assert_eq!(ip, "1.2.3.4");
+    }
+
+    #[test]
+    fn client_ip_uses_xff_when_trusted() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("9.9.9.9"),
+        );
+        let conn = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 1234));
+        let ip = client_ip(&h, conn, true);
+        assert_eq!(ip, "9.9.9.9");
+    }
 }

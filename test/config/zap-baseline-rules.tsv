@@ -1,0 +1,8 @@
+# ZAP baseline rule configuration (TSV).
+# Format: RuleID	Action	(Optional Fingerprint)
+# ACTION: IGNORE, WARN, FAIL
+# Add rows only after triage. ZAP requires ≥3 tab-separated columns (RuleID, Action, Fingerprint).
+# Example:
+# 10021	IGNORE	*
+# Minified Vite/React bundles: false positive "Suspicious Comments" in Vite/React bundles.
+10027	IGNORE	*

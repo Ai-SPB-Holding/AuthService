@@ -39,7 +39,7 @@ impl TotpService {
     }
 
     async fn totp_check_rate(&self, user_id: Uuid) -> Result<(), AppError> {
-        let key = format!("totp:verify:{}", user_id);
+        let key = self.config.redis.key(&format!("totp:verify:{user_id}"));
         let mut c = self.redis.clone();
         let n: i64 = c.incr(&key, 1).await?;
         if n == 1 {
@@ -63,7 +63,9 @@ impl TotpService {
         self.users
             .set_totp_encrypted(user_id, tenant_id, Some(blob))
             .await?;
-        self.users.set_totp_enabled(user_id, tenant_id, false).await?;
+        self.users
+            .set_totp_enabled(user_id, tenant_id, false)
+            .await?;
         let issuer = self.config.totp.issuer_name.clone();
         let totp = build_totp(raw_bytes, Some(issuer.clone()), account_email)?;
         let url = totp.get_url();
@@ -91,7 +93,9 @@ impl TotpService {
         .bind(tenant_id)
         .fetch_one(&self.pool)
         .await?;
-        let blob = enc_blob.ok_or(AppError::Validation("totp not set up; call setup first".to_string()))?;
+        let blob = enc_blob.ok_or(AppError::Validation(
+            "totp not set up; call setup first".to_string(),
+        ))?;
         let raw = self.enc.open(&blob)?;
         let issuer = self.config.totp.issuer_name.clone();
         let totp = build_totp(raw, Some(issuer), &account_email)?;
@@ -99,26 +103,35 @@ impl TotpService {
         if !check_totp(&totp, code, t)? {
             return Err(AppError::Unauthorized);
         }
-        self.users.set_totp_enabled(user_id, tenant_id, true).await?;
+        self.users
+            .set_totp_enabled(user_id, tenant_id, true)
+            .await?;
         Ok(())
     }
 
     /// Disable 2FA after valid current TOTP.
-    pub async fn disable(&self, user_id: Uuid, tenant_id: Uuid, code: &str) -> Result<(), AppError> {
+    pub async fn disable(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        code: &str,
+    ) -> Result<(), AppError> {
         self.totp_check_rate(user_id).await?;
-        let totp_en: bool = sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let totp_en: bool =
+            sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&self.pool)
+                .await?;
         if !totp_en {
             return Err(AppError::Validation("totp not enabled".to_string()));
         }
-        let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let email: String =
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&self.pool)
+                .await?;
         let enc_blob: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT totp_secret_enc FROM users WHERE id = $1 AND tenant_id = $2",
         )
@@ -140,7 +153,7 @@ impl TotpService {
 
     /// Rate limit MFA login attempts (separate from enroll flow).
     async fn mfa_login_rate(&self, user_id: Uuid) -> Result<(), AppError> {
-        let key = format!("mfa:login:totp:{}", user_id);
+        let key = self.config.redis.key(&format!("mfa:login:totp:{user_id}"));
         let mut c = self.redis.clone();
         let n: i64 = c.incr(&key, 1).await?;
         if n == 1 {
@@ -160,11 +173,12 @@ impl TotpService {
         code: &str,
     ) -> Result<(), AppError> {
         self.mfa_login_rate(user_id).await?;
-        let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let email: String =
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&self.pool)
+                .await?;
         let enc_blob: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT totp_secret_enc FROM users WHERE id = $1 AND tenant_id = $2",
         )
@@ -211,11 +225,12 @@ impl TotpService {
         public_client_id: &str,
     ) -> Result<(String, String), AppError> {
         self.totp_check_rate(user_id).await?;
-        let account_email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let account_email: String =
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&self.pool)
+                .await?;
         let (raw_bytes, base32) = generate_totp_secret();
         let blob = self.enc.seal(&raw_bytes)?;
         let id = Uuid::new_v4();
@@ -256,11 +271,12 @@ impl TotpService {
         code: &str,
     ) -> Result<(), AppError> {
         self.totp_check_rate(user_id).await?;
-        let account_email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let account_email: String =
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&self.pool)
+                .await?;
         let enc_blob: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT totp_secret_enc FROM client_user_mfa
              WHERE oauth_client_row_id = $1 AND user_id = $2 AND tenant_id = $3",
@@ -270,16 +286,11 @@ impl TotpService {
         .bind(tenant_id)
         .fetch_optional(&self.pool)
         .await?;
-        let blob = enc_blob.ok_or_else(|| {
-            AppError::Validation("client TOTP: call setup first".to_string())
-        })?;
+        let blob = enc_blob
+            .ok_or_else(|| AppError::Validation("client TOTP: call setup first".to_string()))?;
         let raw = self.enc.open(&blob)?;
         let label = Self::client_totp_label(&account_email, public_client_id);
-        let totp = build_totp(
-            raw,
-            Some(self.config.totp.issuer_name.clone()),
-            &label,
-        )?;
+        let totp = build_totp(raw, Some(self.config.totp.issuer_name.clone()), &label)?;
         let t = Utc::now().timestamp() as u64;
         if !check_totp(&totp, code, t)? {
             return Err(AppError::Unauthorized);
@@ -353,11 +364,12 @@ impl TotpService {
         code: &str,
     ) -> Result<(), AppError> {
         self.mfa_login_rate(user_id).await?;
-        let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let email: String =
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&self.pool)
+                .await?;
         let enc_blob: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT totp_secret_enc FROM client_user_mfa
              WHERE oauth_client_row_id = $1 AND user_id = $2 AND tenant_id = $3",
@@ -396,7 +408,10 @@ impl TotpService {
     }
 
     async fn totp_check_rate_pending(&self, pending_id: Uuid) -> Result<(), AppError> {
-        let key = format!("totp:verify:pending:{pending_id}");
+        let key = self
+            .config
+            .redis
+            .key(&format!("totp:verify:pending:{pending_id}"));
         let mut c = self.redis.clone();
         let n: i64 = c.incr(&key, 1).await?;
         if n == 1 {
@@ -477,14 +492,11 @@ impl TotpService {
         .ok_or(AppError::Unauthorized)?;
         let email: String = row.get("email");
         let enc_blob: Option<Vec<u8>> = row.try_get("client_totp_secret_enc").ok().flatten();
-        let blob = enc_blob.ok_or_else(|| AppError::Validation("client TOTP: call setup first".to_string()))?;
+        let blob = enc_blob
+            .ok_or_else(|| AppError::Validation("client TOTP: call setup first".to_string()))?;
         let raw = self.enc.open(&blob)?;
         let label = Self::client_totp_label(&email, public_client_id);
-        let totp = build_totp(
-            raw,
-            Some(self.config.totp.issuer_name.clone()),
-            &label,
-        )?;
+        let totp = build_totp(raw, Some(self.config.totp.issuer_name.clone()), &label)?;
         let t = Utc::now().timestamp() as u64;
         if !check_totp(&totp, code, t)? {
             return Err(AppError::Unauthorized);

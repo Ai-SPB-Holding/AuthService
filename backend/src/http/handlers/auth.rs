@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ConnectInfo;
-use axum::http::header::{AUTHORIZATION, SET_COOKIE};
 use axum::http::HeaderMap;
+use axum::http::header::{AUTHORIZATION, SET_COOKIE};
 use axum::response::IntoResponse;
 use axum::{Json, extract::State};
 use uuid::Uuid;
@@ -11,12 +11,10 @@ use uuid::Uuid;
 const IDP_SESSION: &str = "idp_session";
 use serde::Deserialize;
 
-use crate::{
-    services::{
-        app_state::AppState,
-        auth_service::{LoginCommand, RegisterCommand, LoginResult},
-        errors::AppError,
-    },
+use crate::services::{
+    app_state::AppState,
+    auth_service::{LoginCommand, LoginResult, RegisterCommand},
+    errors::AppError,
 };
 
 #[derive(Debug, Deserialize)]
@@ -147,16 +145,13 @@ pub async fn login(
         LoginResult::Tokens(ref p) => {
             let v = serde_json::to_value(p).map_err(|e| AppError::Internal(e.to_string()))?;
             let mut res = Json(v).into_response();
-            if payload.set_idp_session == Some(true) && state.auth.jwt.idp_session_secret_configured() {
-                if let Ok(c) = state
-                    .auth
-                    .jwt
-                    .verify(&p.access_token, &payload.audience)
-                {
-                    if let (Ok(uid), Ok(tid)) = (
-                        Uuid::parse_str(&c.sub),
-                        Uuid::parse_str(&c.tenant_id),
-                    ) {
+            if payload.set_idp_session == Some(true)
+                && state.auth.jwt.idp_session_secret_configured()
+            {
+                if let Ok(c) = state.auth.jwt.verify(&p.access_token, &payload.audience) {
+                    if let (Ok(uid), Ok(tid)) =
+                        (Uuid::parse_str(&c.sub), Uuid::parse_str(&c.tenant_id))
+                    {
                         if let Ok(sess) = state.auth.jwt.mint_idp_session(uid, tid) {
                             if let Ok(h) = http::HeaderValue::from_str(&format!(
                                 "{IDP_SESSION}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600",
@@ -226,7 +221,9 @@ pub async fn login_mfa(
         .auth
         .login_mfa(&payload.step_up_token, &payload.totp)
         .await?;
-    Ok(Json(serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?,
+    ))
 }
 
 pub async fn refresh(
@@ -241,7 +238,9 @@ pub async fn refresh(
             payload.client_secret.as_deref(),
         )
         .await?;
-    Ok(Json(serde_json::to_value(&tokens).map_err(|e| AppError::Internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(&tokens).map_err(|e| AppError::Internal(e.to_string()))?,
+    ))
 }
 
 pub async fn logout(

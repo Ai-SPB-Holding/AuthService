@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::extract::Query;
-use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::{Json, extract::State};
 use axum_extra::extract::CookieJar;
@@ -14,6 +14,7 @@ use sqlx::Row;
 use url::Url;
 use uuid::Uuid;
 
+use crate::config::AppConfig;
 use crate::services::app_state::AppState;
 use crate::services::auth_service::LoginCommand;
 use crate::services::client_oauth::{self, ClientCredentialsSource};
@@ -108,38 +109,73 @@ pub async fn userinfo(
     Ok((StatusCode::OK, Json(json!(info))).into_response())
 }
 
-pub async fn metadata(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, AppError> {
-    if let Some(url) = &state.config.oidc.server_metadata_url {
-        let remote = state.oidc_proxy.fetch_metadata(url).await?;
-        return Ok(Json(json!(remote)));
-    }
-
-    let issuer = state.config.server.issuer.as_str();
+/// OpenID Provider metadata served by this IdP when not proxying an upstream discovery URL.
+pub fn openid_configuration_document(config: &AppConfig) -> serde_json::Value {
+    let issuer = config.server.issuer.as_str();
     let mut grants = vec![
         serde_json::Value::String("authorization_code".to_string()),
         serde_json::Value::String("refresh_token".to_string()),
     ];
-    if state.config.auth.allow_resource_owner_password_grant {
+    if config.auth.allow_resource_owner_password_grant {
         grants.push(serde_json::Value::String("password".to_string()));
     }
     grants.push(serde_json::Value::String("embedded_session".to_string()));
-    Ok(Json(json!({
-        "issuer": issuer,
-        "authorization_endpoint": format!("{}/authorize", issuer),
-        "token_endpoint": format!("{}/token", issuer),
-        "oauth2_authorization_endpoint": format!("{}/oauth2/authorize", issuer),
-        "oauth2_token_endpoint": format!("{}/oauth2/token", issuer),
-        "userinfo_endpoint": format!("{}/userinfo", issuer),
-        "oauth2_userinfo_endpoint": format!("{}/oauth2/userinfo", issuer),
-        "revocation_endpoint": format!("{}/revoke", issuer),
-        "introspection_endpoint": format!("{}/introspect", issuer),
-        "jwks_uri": format!("{}/jwks.json", issuer),
+    let iss = issuer.trim_end_matches('/');
+    json!({
+        "issuer": iss,
+        "authorization_endpoint": format!("{iss}/oauth2/authorize"),
+        "token_endpoint": format!("{iss}/oauth2/token"),
+        "userinfo_endpoint": format!("{iss}/oauth2/userinfo"),
+        "revocation_endpoint": format!("{iss}/oauth2/revoke"),
+        "introspection_endpoint": format!("{iss}/oauth2/introspect"),
+        "jwks_uri": format!("{iss}/.well-known/jwks.json"),
         "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
+        "scopes_supported": ["openid", "profile", "email", "read", "write"],
         "grant_types_supported": grants,
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
-        "code_challenge_methods_supported": ["S256"],
-        "id_token_signing_alg_values_supported": ["RS256"]
-    })))
+        "code_challenge_methods_supported": ["S256", "none"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "oauth2_authorization_endpoint": format!("{iss}/oauth2/authorize"),
+        "oauth2_token_endpoint": format!("{iss}/oauth2/token"),
+        "oauth2_userinfo_endpoint": format!("{iss}/oauth2/userinfo"),
+        "legacy_authorization_endpoint": format!("{iss}/authorize"),
+        "legacy_token_endpoint": format!("{iss}/token"),
+        "legacy_userinfo_endpoint": format!("{iss}/userinfo"),
+        "legacy_revocation_endpoint": format!("{iss}/revoke"),
+        "legacy_introspection_endpoint": format!("{iss}/introspect"),
+        "legacy_jwks_uri": format!("{iss}/jwks.json")
+    })
+}
+
+pub async fn metadata(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let meta_url = state
+        .config
+        .oidc
+        .server_metadata_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if let Some(url) = meta_url {
+        match state.oidc_proxy.fetch_metadata(url).await {
+            Ok(remote) => return Ok(Json(json!(remote))),
+            Err(e) => {
+                tracing::warn!(error = %e, url = %url, "oidc proxy metadata fetch failed");
+                if state.config.oidc.metadata_proxy_fallback {
+                    tracing::warn!(
+                        "OIDC__METADATA_PROXY_FALLBACK=true: serving built-in openid-configuration"
+                    );
+                    return Ok(Json(openid_configuration_document(&state.config)));
+                }
+                return Err(AppError::OidcDiscoveryUnavailable);
+            }
+        }
+    }
+
+    Ok(Json(openid_configuration_document(&state.config)))
 }
 
 /// `GET /authorize` — requires `idp_session` cookie, or temporary redirect to `OIDC__LOGIN_URL?return_to=...`.
@@ -149,7 +185,9 @@ pub async fn authorize(
     jar: CookieJar,
 ) -> Result<Response, AppError> {
     if q.response_type != "code" {
-        return Err(AppError::Validation("unsupported response_type".to_string()));
+        return Err(AppError::Validation(
+            "unsupported response_type".to_string(),
+        ));
     }
 
     if let Some(login) = &state.config.oidc.login_url {
@@ -167,7 +205,11 @@ pub async fn authorize(
 
     let c = jar.get(IDP_SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
     let tok = c.value();
-    let sess = state.auth.jwt.verify_idp_session(tok).map_err(|_| AppError::Unauthorized)?;
+    let sess = state
+        .auth
+        .jwt
+        .verify_idp_session(tok)
+        .map_err(|_| AppError::Unauthorized)?;
     let user_sub = Uuid::parse_str(&sess.sub).map_err(|_| AppError::Unauthorized)?;
     let tenant_id_sess = Uuid::parse_str(&sess.tenant_id).map_err(|_| AppError::Unauthorized)?;
 
@@ -213,7 +255,8 @@ pub async fn authorize(
                 .await?;
             if !ok {
                 return Err(AppError::Validation(
-                    "2FA (Authenticator) is required for this client before authorization".to_string(),
+                    "2FA (Authenticator) is required for this client before authorization"
+                        .to_string(),
                 ));
             }
         }
@@ -249,7 +292,8 @@ pub async fn authorize(
         )
         .await?;
 
-    let mut u = Url::parse(&q.redirect_uri).map_err(|_| AppError::Validation("invalid redirect_uri url".to_string()))?;
+    let mut u = Url::parse(&q.redirect_uri)
+        .map_err(|_| AppError::Validation("invalid redirect_uri url".to_string()))?;
     u.query_pairs_mut().append_pair("code", &code);
     if let Some(ref s) = q.state {
         u.query_pairs_mut().append_pair("state", s);
@@ -299,10 +343,7 @@ pub async fn token(
         .unwrap_or(&state.config.auth.admin_api_audience);
 
     let (basic_cid, basic_sec) = merge_client_credentials(&headers, None, None);
-    let client_secret_merged = payload
-        .client_secret
-        .clone()
-        .or(basic_sec);
+    let client_secret_merged = payload.client_secret.clone().or(basic_sec);
     let client_id_merged = payload.client_id.clone().or(basic_cid);
 
     let creds_src = if parse_basic_client_credentials(&headers).is_some() {
@@ -397,10 +438,14 @@ pub async fn token(
                     client_secret_merged.as_deref(),
                 )
                 .await?;
-            Ok(Json(serde_json::to_value(&tokens).map_err(|e| AppError::Internal(e.to_string()))?))
+            Ok(Json(
+                serde_json::to_value(&tokens).map_err(|e| AppError::Internal(e.to_string()))?,
+            ))
         }
         "authorization_code" => {
-            let code = payload.code.ok_or_else(|| AppError::Validation("code required".to_string()))?;
+            let code = payload
+                .code
+                .ok_or_else(|| AppError::Validation("code required".to_string()))?;
             let ver = payload.code_verifier.as_deref().unwrap_or("");
             let ruri = payload
                 .redirect_uri
@@ -420,7 +465,8 @@ pub async fn token(
                     creds_src,
                 )
                 .await?;
-            let mut m = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut m =
+                serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
             if let Some(obj) = m.as_object_mut() {
                 obj.insert("token_type".to_string(), json!("Bearer"));
             }
@@ -439,8 +485,14 @@ pub async fn revoke(
     headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, AppError> {
-    let body_cid = body.get("client_id").and_then(|v| v.as_str()).map(String::from);
-    let body_sec = body.get("client_secret").and_then(|v| v.as_str()).map(String::from);
+    let body_cid = body
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let body_sec = body
+        .get("client_secret")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let (cid, sec) = merge_client_credentials(&headers, body_cid, body_sec);
     let cid = cid.ok_or_else(|| AppError::Validation("client_id is required".to_string()))?;
     let creds_src = if parse_basic_client_credentials(&headers).is_some() {
@@ -463,7 +515,8 @@ pub async fn introspect(
     headers: axum::http::HeaderMap,
     Json(req): Json<IntrospectRequest>,
 ) -> Result<Json<IntrospectResponse>, AppError> {
-    let (cid, sec) = merge_client_credentials(&headers, req.client_id.clone(), req.client_secret.clone());
+    let (cid, sec) =
+        merge_client_credentials(&headers, req.client_id.clone(), req.client_secret.clone());
     let cid = cid.ok_or_else(|| AppError::Validation("client_id is required".to_string()))?;
     let creds_src = if parse_basic_client_credentials(&headers).is_some() {
         ClientCredentialsSource::BasicHeader

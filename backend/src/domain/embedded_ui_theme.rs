@@ -1,6 +1,6 @@
 //! Whitelisted design tokens for `clients.embedded_ui_theme` and runtime `THEME_UPDATE`.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 const MAX_STR: usize = 64;
 
@@ -54,16 +54,7 @@ pub fn validate_embedded_ui_theme(input: Option<&Value>) -> Result<Option<Value>
         out.insert("font".to_string(), parse_font(f)?);
     }
     for k in obj.keys() {
-        if ![
-            "v",
-            "colorScheme",
-            "colors",
-            "radius",
-            "spacing",
-            "font",
-        ]
-        .contains(&k.as_str())
-        {
+        if !["v", "colorScheme", "colors", "radius", "spacing", "font"].contains(&k.as_str()) {
             return Err(format!("unknown theme key: {k}"));
         }
     }
@@ -74,13 +65,7 @@ fn parse_colors(c: &Value) -> Result<Value, String> {
     let o = c
         .as_object()
         .ok_or_else(|| "colors must be an object".to_string())?;
-    const KEYS: [&str; 5] = [
-        "primary",
-        "onPrimary",
-        "background",
-        "surface",
-        "error",
-    ];
+    const KEYS: [&str; 5] = ["primary", "onPrimary", "background", "surface", "error"];
     let mut m = Map::new();
     for k in KEYS {
         if let Some(x) = o.get(k) {
@@ -106,7 +91,9 @@ fn parse_sp_radius(v: &Value, cap: u64) -> Result<Value, String> {
     let mut m = Map::new();
     for k in KEYS {
         if let Some(x) = o.get(k) {
-            let n = x.as_u64().ok_or_else(|| "radius/spacing values must be integers")?;
+            let n = x
+                .as_u64()
+                .ok_or_else(|| "radius/spacing values must be integers")?;
             if n > cap {
                 return Err(format!("value {k} out of range (0..={cap})"));
             }

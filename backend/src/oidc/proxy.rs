@@ -19,7 +19,9 @@ pub struct OidcMetadata {
 
 impl OidcProxy {
     pub fn new() -> Self {
-        Self { client: Client::new() }
+        Self {
+            client: Client::new(),
+        }
     }
 
     pub async fn fetch_metadata(&self, metadata_url: &str) -> Result<OidcMetadata, AppError> {

@@ -12,10 +12,14 @@ use std::sync::Arc;
 
 use axum::http::Method;
 use axum::middleware::from_fn_with_state;
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use config::AppConfig;
 use http::handlers::{
-    auth, email_verification_http, embedded_login, health, metrics, oauth2, oidc as oidc_handlers, two_factor,
+    auth, bootstrap, email_verification_http, embedded_login, health, metrics, oauth2,
+    oidc as oidc_handlers, two_factor,
 };
 use services::app_state::AppState;
 use tower_http::cors::{Any, CorsLayer};
@@ -64,7 +68,10 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
 
     let email_routes = Router::new()
         .route("/email/send-code", post(email_verification_http::send_code))
-        .route("/email/verify-code", post(email_verification_http::verify_code));
+        .route(
+            "/email/verify-code",
+            post(email_verification_http::verify_code),
+        );
 
     let oauth_rate_limit = axum::middleware::from_fn_with_state(
         state.clone(),
@@ -72,7 +79,11 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
     );
 
     let oidc_routes = Router::new()
-        .route("/.well-known/openid-configuration", get(oidc_handlers::metadata))
+        .route(
+            "/.well-known/openid-configuration",
+            get(oidc_handlers::metadata),
+        )
+        .route("/.well-known/jwks.json", get(oidc_handlers::jwks))
         .route("/authorize", get(oidc_handlers::authorize))
         .route("/token", post(oidc_handlers::token))
         .route("/userinfo", get(oidc_handlers::userinfo))
@@ -138,7 +149,8 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
         .route("/admin/rbac", get(crate::http::handlers::admin::get_rbac))
         .route(
             "/admin/clients",
-            get(crate::http::handlers::admin_portal::list_clients).post(crate::http::handlers::admin::create_client),
+            get(crate::http::handlers::admin_portal::list_clients)
+                .post(crate::http::handlers::admin::create_client),
         )
         .route(
             "/admin/clients/generate-id",
@@ -172,11 +184,13 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
         )
         .route(
             "/oauth/clients",
-            get(crate::http::handlers::admin_portal::list_clients).post(crate::http::handlers::admin::create_client),
+            get(crate::http::handlers::admin_portal::list_clients)
+                .post(crate::http::handlers::admin::create_client),
         )
         .route(
             "/oauth/clients/:id",
-            get(crate::http::handlers::admin_portal::get_client).put(crate::http::handlers::admin::update_client),
+            get(crate::http::handlers::admin_portal::get_client)
+                .put(crate::http::handlers::admin::update_client),
         )
         .route(
             "/admin/audit-logs",
@@ -196,7 +210,8 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
         )
         .route(
             "/admin/users",
-            get(crate::http::handlers::admin::list_users).post(crate::http::handlers::admin::create_user),
+            get(crate::http::handlers::admin::list_users)
+                .post(crate::http::handlers::admin::create_user),
         )
         .route(
             "/admin/users/:id/send-verification-email",
@@ -217,7 +232,10 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
                 .put(crate::http::handlers::admin::update_user)
                 .delete(crate::http::handlers::admin::delete_user),
         )
-        .route("/admin/roles", post(crate::http::handlers::admin::create_role))
+        .route(
+            "/admin/roles",
+            post(crate::http::handlers::admin::create_role),
+        )
         .route(
             "/admin/roles/:id",
             get(crate::http::handlers::admin::get_role)
@@ -252,9 +270,8 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
     let admin_settings_route = Router::new()
         .route(
             "/admin/settings",
-            get(crate::http::handlers::admin_settings::get_settings).put(
-                crate::http::handlers::admin_settings::put_settings,
-            ),
+            get(crate::http::handlers::admin_settings::get_settings)
+                .put(crate::http::handlers::admin_settings::put_settings),
         )
         .route_layer(from_fn_with_state(
             state.clone(),
@@ -287,6 +304,7 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
 
     Ok(Router::new()
         .route("/health", get(health::healthcheck))
+        .route("/bootstrap/admin", post(bootstrap::bootstrap_admin))
         .route("/metrics", get(metrics::metrics))
         .route("/embedded-login", get(embedded_login::embedded_login_page))
         .merge(embedded_api_routes)
@@ -298,6 +316,10 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
         .merge(admin_session_route)
         .merge(admin_settings_route)
         .merge(admin_routes)
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(from_fn_with_state(
+            state,
+            crate::middleware::http_security::security_response_headers,
+        ))
         .layer(cors))
 }

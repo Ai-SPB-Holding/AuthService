@@ -2,10 +2,13 @@
 
 use std::sync::Arc;
 
-use axum::{Extension, Json, extract::{Path, Query, State}};
+use axum::{
+    Extension, Json,
+    extract::{Path, Query, State},
+};
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgRow;
 use sqlx::Row;
+use sqlx::postgres::PgRow;
 use uuid::Uuid;
 
 use crate::security::jwt::AccessClaims;
@@ -74,6 +77,10 @@ pub struct ClientRow {
     /// When true, v2 `postMessage` envelope (see `docs/EMBEDDED_IFRAME_PROTOCOL.md`).
     pub embedded_protocol_v2: bool,
     pub embedded_ui_theme: Option<serde_json::Value>,
+    /// Override access JWT TTL (seconds); `None` = server default.
+    pub access_ttl_seconds: Option<i32>,
+    /// Override refresh token TTL (seconds); `None` = server default.
+    pub refresh_ttl_seconds: Option<i32>,
     pub user_schema: Vec<serde_json::Value>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -82,8 +89,10 @@ pub async fn list_clients(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<AccessClaims>,
 ) -> Result<Json<Vec<ClientRow>>, AppError> {
-    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let tenant_id = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
 
     let rows = if global {
         sqlx::query(
@@ -98,6 +107,8 @@ pub async fn list_clients(
                 COALESCE(embedded_parent_origins, '[]'::jsonb) AS embedded_parent_origins,
                 COALESCE(embedded_protocol_v2, false) AS embedded_protocol_v2,
                 embedded_ui_theme,
+                access_ttl_seconds,
+                refresh_ttl_seconds,
                 created_at
          FROM clients ORDER BY tenant_id, client_id",
         )
@@ -116,6 +127,8 @@ pub async fn list_clients(
                 COALESCE(embedded_parent_origins, '[]'::jsonb) AS embedded_parent_origins,
                 COALESCE(embedded_protocol_v2, false) AS embedded_protocol_v2,
                 embedded_ui_theme,
+                access_ttl_seconds,
+                refresh_ttl_seconds,
                 created_at
          FROM clients WHERE tenant_id = $1 ORDER BY client_id",
         )
@@ -183,6 +196,8 @@ async fn client_row_from_row(pool: &sqlx::PgPool, row: &PgRow) -> Result<ClientR
             .unwrap_or_else(|_| serde_json::json!([])),
         embedded_protocol_v2: row.try_get("embedded_protocol_v2").unwrap_or(false),
         embedded_ui_theme: row.try_get("embedded_ui_theme").ok().flatten(),
+        access_ttl_seconds: row.try_get("access_ttl_seconds").ok().flatten(),
+        refresh_ttl_seconds: row.try_get("refresh_ttl_seconds").ok().flatten(),
         user_schema,
         created_at: row.get("created_at"),
     })
@@ -193,8 +208,10 @@ pub async fn get_client(
     Extension(claims): Extension<AccessClaims>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ClientRow>, AppError> {
-    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let tenant_id = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let row = if global {
         sqlx::query(
             "SELECT id, tenant_id, client_id, client_type, client_secret_argon2, redirect_uri,
@@ -208,6 +225,8 @@ pub async fn get_client(
                 COALESCE(embedded_parent_origins, '[]'::jsonb) AS embedded_parent_origins,
                 COALESCE(embedded_protocol_v2, false) AS embedded_protocol_v2,
                 embedded_ui_theme,
+                access_ttl_seconds,
+                refresh_ttl_seconds,
                 created_at
          FROM clients WHERE id = $1",
         )
@@ -227,6 +246,8 @@ pub async fn get_client(
                 COALESCE(embedded_parent_origins, '[]'::jsonb) AS embedded_parent_origins,
                 COALESCE(embedded_protocol_v2, false) AS embedded_protocol_v2,
                 embedded_ui_theme,
+                access_ttl_seconds,
+                refresh_ttl_seconds,
                 created_at
          FROM clients WHERE id = $1 AND tenant_id = $2",
         )
@@ -263,8 +284,10 @@ pub async fn list_audit_logs(
     Extension(claims): Extension<AccessClaims>,
     Query(q): Query<ListAuditQuery>,
 ) -> Result<Json<Vec<AuditListItem>>, AppError> {
-    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let tenant_id = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let limit = q.limit.unwrap_or(100).min(500).max(1);
 
     let mut items: Vec<AuditListItem> = Vec::new();
@@ -288,8 +311,7 @@ pub async fn list_audit_logs(
         .await
     };
 
-    match audit_q
-    {
+    match audit_q {
         Ok(rows) => {
             for row in rows {
                 let id: Uuid = row.get("id");
@@ -370,8 +392,10 @@ pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<AccessClaims>,
 ) -> Result<Json<Vec<SessionRow>>, AppError> {
-    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let tenant_id = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
 
     let rows = if global {
         sqlx::query(
@@ -424,14 +448,17 @@ pub async fn revoke_session(
     Extension(claims): Extension<AccessClaims>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let actor_tenant = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
-    let global = crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
+    let actor_tenant = Uuid::parse_str(&claims.tenant_id)
+        .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
+    let global =
+        crate::http::handlers::admin_scope::is_deployment_global_admin(&state.config, &claims);
     let actor = Uuid::parse_str(&claims.sub).ok();
 
-    let row_tid: Option<Uuid> = sqlx::query_scalar("SELECT tenant_id FROM refresh_tokens WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
+    let row_tid: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM refresh_tokens WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some(token_tenant) = row_tid else {
         return Err(AppError::NotFound);
     };

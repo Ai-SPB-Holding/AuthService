@@ -77,15 +77,14 @@ pub async fn put_settings(
     let tenant_id = Uuid::parse_str(&claims.tenant_id)
         .map_err(|_| AppError::Validation("invalid tenant in token".to_string()))?;
 
-    let totp_user_enabled: bool = sqlx::query_scalar(
-        "SELECT totp_enabled FROM users WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .unwrap_or(false);
+    let totp_user_enabled: bool =
+        sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(user_id)
+            .bind(tenant_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .unwrap_or(false);
 
     let need_totp = state.config.auth.require_login_2fa || totp_user_enabled;
     if would_touch_sensitive(&body) && need_totp {
@@ -105,14 +104,8 @@ pub async fn put_settings(
             .await?;
     }
 
-    let (view, restart) = apply_settings_update(
-        &state.config,
-        &state.pool,
-        tenant_id,
-        user_id,
-        body,
-    )
-    .await?;
+    let (view, restart) =
+        apply_settings_update(&state.config, &state.pool, tenant_id, user_id, body).await?;
 
     Ok(Json(serde_json::json!({
         "settings": view,

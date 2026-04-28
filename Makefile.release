@@ -1,0 +1,89 @@
+SHELL := /usr/bin/env bash
+.SHELLFLAGS := -euo pipefail -c
+
+API_URL ?= http://127.0.0.1:8080
+AUDIENCE ?= auth-service
+
+TENANT_ID ?=
+ADMIN_BEARER ?=
+EMAIL ?=
+PASSWORD ?=
+USER_ID ?=
+ADMIN_ROLE ?= admin
+
+.PHONY: help user-add user-promote-admin server-check user-list-db
+.PHONY: bootstrap-admin
+
+help:
+	@echo "Release ops commands:"
+	@echo "  make user-add EMAIL=<email> PASSWORD=<password> ADMIN_BEARER=<jwt> [API_URL=...]"
+	@echo "  make bootstrap-admin EMAIL=<email> PASSWORD=<password> BOOTSTRAP_TOKEN=<token> [API_URL=...]"
+	@echo "  make user-list-db TENANT_ID=<uuid> DATABASE_URL=postgres://..."
+	@echo "  make user-promote-admin TENANT_ID=<uuid> USER_ID=<uuid> [DATABASE_URL=postgres://...]"
+	@echo "  make server-check"
+
+check-email:
+	@if [ -z "$(EMAIL)" ]; then echo "EMAIL is required"; exit 1; fi
+
+check-password:
+	@if [ -z "$(PASSWORD)" ]; then echo "PASSWORD is required"; exit 1; fi
+
+check-tenant:
+	@if [ -z "$(TENANT_ID)" ]; then echo "TENANT_ID is required"; exit 1; fi
+
+check-user-id:
+	@if [ -z "$(USER_ID)" ]; then echo "USER_ID is required"; exit 1; fi
+
+check-admin-bearer:
+	@if [ -z "$(ADMIN_BEARER)" ]; then \
+		echo "ADMIN_BEARER is required: JWT with admin role and aud=$(AUDIENCE) (e.g. from dashboard login)."; \
+		exit 1; \
+	fi
+
+# Create a new user+tenant via admin API.
+user-add: check-email check-password check-admin-bearer
+	@TENANT_ID_GEN=$$(uuidgen | tr '[:upper:]' '[:lower:]'); \
+	echo "Creating user via $(API_URL)/auth/register (admin bearer)"; \
+	echo "Generated TENANT_ID=$${TENANT_ID_GEN}"; \
+	curl -sS -X POST "$(API_URL)/auth/register" \
+		-H "Content-Type: application/json" \
+		-H "Authorization: Bearer $(ADMIN_BEARER)" \
+		-d "{\"tenant_id\":\"$${TENANT_ID_GEN}\",\"email\":\"$(EMAIL)\",\"password\":\"$(PASSWORD)\",\"registration_source\":\"make-release\"}" \
+		|| (echo "Failed to create user" && exit 1); \
+	echo; \
+	echo "TENANT_ID=$${TENANT_ID_GEN}"
+
+# Promote existing user to admin role in DB (requires psql + DATABASE_URL env on the server).
+user-promote-admin: check-tenant check-user-id
+	@if [ -z "$${DATABASE_URL:-}" ]; then echo "DATABASE_URL env is required (postgres://...)"; exit 1; fi
+	@psql "$${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO roles (id, tenant_id, name) SELECT uuid_generate_v4(), '$(TENANT_ID)'::uuid, '$(ADMIN_ROLE)' WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id='$(TENANT_ID)'::uuid AND name='$(ADMIN_ROLE)');"
+	@psql "$${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO user_roles (tenant_id, user_id, role_id) SELECT '$(TENANT_ID)'::uuid, '$(USER_ID)'::uuid, r.id FROM roles r WHERE r.tenant_id='$(TENANT_ID)'::uuid AND r.name='$(ADMIN_ROLE)' ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;"
+
+server-check:
+	@./scripts/server-check.sh
+
+bootstrap-admin: check-email check-password
+	@if [ -z "$${BOOTSTRAP_TOKEN:-}" ]; then echo "BOOTSTRAP_TOKEN env is required (AUTH__BOOTSTRAP_ADMIN_TOKEN)"; exit 1; fi
+	@TENANT_ID_GEN=$$(uuidgen | tr '[:upper:]' '[:lower:]'); \
+	echo "Bootstrapping first admin via $(API_URL)/bootstrap/admin"; \
+	echo "TENANT_ID=$${TENANT_ID_GEN}"; \
+	BODY_FILE=$$(mktemp); \
+	CODE=$$(curl -sS -o "$${BODY_FILE}" -w "%{http_code}" -X POST "$(API_URL)/bootstrap/admin" \
+		-H "Content-Type: application/json" \
+		-H "Authorization: Bearer $${BOOTSTRAP_TOKEN}" \
+		-d "{\"tenant_id\":\"$${TENANT_ID_GEN}\",\"email\":\"$(EMAIL)\",\"password\":\"$(PASSWORD)\"}"); \
+	echo "HTTP $${CODE}"; \
+	cat "$${BODY_FILE}"; echo; \
+	rm -f "$${BODY_FILE}"; \
+	if [ "$${CODE}" != "201" ]; then \
+		echo "Bootstrap failed. Expected 201. Common causes:"; \
+		echo " - wrong BOOTSTRAP_TOKEN (must match AUTH__BOOTSTRAP_ADMIN_TOKEN in .env)"; \
+		echo " - users table is not empty (bootstrap only works for a fresh DB)"; \
+		exit 1; \
+	fi; \
+	echo "Use this TENANT_ID in the dashboard login form: $${TENANT_ID_GEN}"
+
+user-list-db: check-tenant
+	@if [ -z "$${DATABASE_URL:-}" ]; then echo "DATABASE_URL env is required (postgres://...)"; exit 1; fi
+	@psql "$${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "SELECT id, tenant_id, email, is_active, is_locked, email_verified FROM users WHERE tenant_id='$(TENANT_ID)'::uuid ORDER BY created_at DESC;"
+

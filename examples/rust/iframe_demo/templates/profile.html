@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Profile — __CLIENT_LABEL__</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; border-radius: 8px; font-size: 0.85rem; }
+    nav a { margin-right: 1rem; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/">Login</a>
+    <a href="/register">Register</a>
+    <a href="/profile">Profile</a>
+  </nav>
+  <h1>Profile</h1>
+  <p><strong>client_id</strong>: __OAUTH_CLIENT_ID__</p>
+  __REFRESH_BLOCK__
+  <h2>Userinfo</h2>
+  <pre>__USERINFO_JSON__</pre>
+  <h2>Stored record</h2>
+  <pre>__RECORD_JSON__</pre>
+  <form method="post" action="/logout"><button type="submit">Logout</button></form>
+</body>
+</html>

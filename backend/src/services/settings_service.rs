@@ -98,7 +98,13 @@ fn upsert_env_line(content: &str, key: &str, value: &str) -> String {
         out_lines.push(line.to_string());
     }
     if !seen {
-        if !out_lines.is_empty() && !out_lines.last().map(|s| s.as_str()).unwrap_or("").is_empty() {
+        if !out_lines.is_empty()
+            && !out_lines
+                .last()
+                .map(|s| s.as_str())
+                .unwrap_or("")
+                .is_empty()
+        {
             out_lines.push(String::new());
         }
         out_lines.push(new_line);
@@ -113,10 +119,7 @@ fn upsert_env_line(content: &str, key: &str, value: &str) -> String {
 fn atomic_write(path: &Path, content: &str) -> Result<(), AppError> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let tmp_path = if let Some(d) = dir {
-        d.join(format!(
-            ".env.tmp.{}",
-            std::process::id()
-        ))
+        d.join(format!(".env.tmp.{}", std::process::id()))
     } else {
         PathBuf::from(format!(".env.tmp.{}", std::process::id()))
     };
@@ -164,7 +167,9 @@ fn validate_totp_key_b64(s: &str) -> Result<(), AppError> {
 fn validate_issuer(s: &str) -> Result<(), AppError> {
     let t = s.trim();
     if t.is_empty() {
-        return Err(AppError::Validation("SERVER__ISSUER cannot be empty".to_string()));
+        return Err(AppError::Validation(
+            "SERVER__ISSUER cannot be empty".to_string(),
+        ));
     }
     if !(t.starts_with("http://") || t.starts_with("https://")) {
         return Err(AppError::Validation(
@@ -187,6 +192,14 @@ pub struct SettingsView {
     pub env_file_path: String,
     #[serde(default)]
     pub restart_required_note: Option<String>,
+    /// Server default access JWT TTL (`AUTH__ACCESS_TTL_SECONDS`).
+    pub default_access_ttl_seconds: u64,
+    /// Server default refresh token TTL (`AUTH__REFRESH_TTL_SECONDS`).
+    pub default_refresh_ttl_seconds: u64,
+    /// Max allowed per-client access TTL (`AUTH__MAX_CLIENT_ACCESS_TTL_SECONDS`).
+    pub max_client_access_ttl_seconds: u64,
+    /// Max allowed per-client refresh TTL (`AUTH__MAX_CLIENT_REFRESH_TTL_SECONDS`).
+    pub max_client_refresh_ttl_seconds: u64,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -251,6 +264,10 @@ pub fn load_settings_view(config: &AppConfig, env_path: &Path) -> Result<Setting
         totp_encryption_key_b64_set: totp_set,
         env_file_path: env_path.display().to_string(),
         restart_required_note: None,
+        default_access_ttl_seconds: config.auth.access_ttl_seconds,
+        default_refresh_ttl_seconds: config.auth.refresh_ttl_seconds,
+        max_client_access_ttl_seconds: config.auth.max_client_access_ttl_seconds,
+        max_client_refresh_ttl_seconds: config.auth.max_client_refresh_ttl_seconds,
     })
 }
 
@@ -298,9 +315,8 @@ pub async fn apply_settings_update(
     };
 
     let mut content = if path.exists() {
-        std::fs::read_to_string(&path).map_err(|e| {
-            AppError::Internal(format!("read {}: {e}", path.display()))
-        })?
+        std::fs::read_to_string(&path)
+            .map_err(|e| AppError::Internal(format!("read {}: {e}", path.display())))?
     } else {
         String::new()
     };
@@ -397,7 +413,10 @@ mod tests {
     fn upsert_replaces_existing_key() {
         let content = "FOO=bar\nAUTH__COOKIE_SECRET=old\nBAZ=qux\n";
         let next = upsert_env_line(content, "AUTH__COOKIE_SECRET", "newsecretvalue");
-        assert!(next.contains("AUTH__COOKIE_SECRET=newsecretvalue") || next.contains("AUTH__COOKIE_SECRET=\"newsecretvalue\""));
+        assert!(
+            next.contains("AUTH__COOKIE_SECRET=newsecretvalue")
+                || next.contains("AUTH__COOKIE_SECRET=\"newsecretvalue\"")
+        );
         assert!(!next.contains("AUTH__COOKIE_SECRET=old"));
     }
 }

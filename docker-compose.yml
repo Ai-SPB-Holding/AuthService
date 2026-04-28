@@ -27,7 +27,7 @@ services:
         VITE_SSE_URL: /events
     container_name: auth-dashboard
     ports:
-      - "5173:80"
+      - "5174:80"
     depends_on:
       backend:
         condition: service_healthy
@@ -41,11 +41,11 @@ services:
       POSTGRES_PASSWORD: auth
       POSTGRES_DB: auth
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U auth -d auth"]
+      test: ["CMD-SHELL", "pg_isready -U auth -d auth -p 5432"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -55,7 +55,7 @@ services:
     image: redis:7
     container_name: auth-redis
     ports:
-      - "6379:6379"
+      - "6378:6379"
     restart: unless-stopped
 
 volumes:

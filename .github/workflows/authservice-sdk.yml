@@ -1,0 +1,32 @@
+name: authservice-sdk
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    paths:
+      - "AAuthLib/authservice-sdk/**"
+      - ".github/workflows/authservice-sdk.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy -p authservice-sdk --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test -p authservice-sdk --all-features

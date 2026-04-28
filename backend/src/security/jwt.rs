@@ -1,10 +1,10 @@
 use base64::Engine;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
-use rsa::RsaPublicKey;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
@@ -231,8 +231,10 @@ impl JwtService {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("rsa-key-0")
                     .to_string();
-                let decoding_prev = DecodingKey::from_rsa_pem(prev_pem.as_bytes())
-                    .map_err(|e| AppError::Config(format!("invalid previous JWT public key: {e}")))?;
+                let decoding_prev =
+                    DecodingKey::from_rsa_pem(prev_pem.as_bytes()).map_err(|e| {
+                        AppError::Config(format!("invalid previous JWT public key: {e}"))
+                    })?;
                 decoding_keys.push(decoding_prev);
                 jwks_keys.push(rsa_jwk_entry(&prev_pem, &prev_kid)?);
             }
@@ -314,6 +316,7 @@ impl JwtService {
         email_verified: bool,
         scope: Option<String>,
         session_id: Option<Uuid>,
+        access_ttl_seconds: Option<i64>,
     ) -> Result<String, AppError> {
         self.mint_access_token_with_jti(
             user_id,
@@ -325,6 +328,7 @@ impl JwtService {
             scope,
             Uuid::new_v4().to_string(),
             session_id,
+            access_ttl_seconds,
         )
     }
 
@@ -339,13 +343,15 @@ impl JwtService {
         scope: Option<String>,
         jti: String,
         session_id: Option<Uuid>,
+        access_ttl_seconds: Option<i64>,
     ) -> Result<String, AppError> {
+        let ttl = access_ttl_seconds.unwrap_or(self.access_ttl_seconds);
         let now = Utc::now();
         let iat = now.timestamp() as usize;
         let claims = AccessClaims {
             sub: user_id.to_string(),
             jti: Some(jti),
-            exp: (now + Duration::seconds(self.access_ttl_seconds)).timestamp() as usize,
+            exp: (now + Duration::seconds(ttl)).timestamp() as usize,
             iat: Some(iat),
             iss: self.issuer.clone(),
             aud: audience.to_string(),
@@ -372,14 +378,16 @@ impl JwtService {
         email_verified: bool,
         row_id: Uuid,
         family_id: Uuid,
+        refresh_ttl_seconds: Option<i64>,
     ) -> Result<String, AppError> {
+        let ttl = refresh_ttl_seconds.unwrap_or(self.refresh_ttl_seconds);
         let now = Utc::now();
         let iat = now.timestamp() as usize;
         let claims = RefreshTokenClaims {
             sub: user_id.to_string(),
             jti: row_id.to_string(),
             family: family_id.to_string(),
-            exp: (now + Duration::seconds(self.refresh_ttl_seconds)).timestamp() as usize,
+            exp: (now + Duration::seconds(ttl)).timestamp() as usize,
             iat,
             iss: self.issuer.clone(),
             aud: audience.to_string(),
@@ -403,7 +411,9 @@ impl JwtService {
         email: Option<String>,
         email_verified: bool,
         access_token_for_at_hash: &str,
+        access_ttl_seconds: Option<i64>,
     ) -> Result<String, AppError> {
+        let ttl = access_ttl_seconds.unwrap_or(self.access_ttl_seconds);
         let now = Utc::now();
         let iat = now.timestamp() as usize;
         let at_hash = at_hash_s256(access_token_for_at_hash);
@@ -411,12 +421,16 @@ impl JwtService {
             sub: user_id.to_string(),
             iss: self.issuer.clone(),
             aud: client_id.to_string(),
-            exp: (now + Duration::seconds(self.access_ttl_seconds)).timestamp() as usize,
+            exp: (now + Duration::seconds(ttl)).timestamp() as usize,
             iat,
             auth_time: iat,
             nonce,
             email: email.clone(),
-            email_verified: if email.is_some() { Some(email_verified) } else { None },
+            email_verified: if email.is_some() {
+                Some(email_verified)
+            } else {
+                None
+            },
             at_hash: Some(at_hash),
         };
         let mut header = Header::new(Algorithm::RS256);
@@ -492,7 +506,8 @@ impl JwtService {
         let now = Utc::now();
         let claims = EmailVerifyClaims {
             sub: user_id.to_string(),
-            exp: (now + Duration::seconds(self.email_verification_jwt_seconds)).timestamp() as usize,
+            exp: (now + Duration::seconds(self.email_verification_jwt_seconds)).timestamp()
+                as usize,
             iss: self.issuer.clone(),
             aud: AUD_EMAIL_VERIFY.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -520,7 +535,8 @@ impl JwtService {
         let now = Utc::now();
         let claims = EmailVerifyClaims {
             sub: pending_registration_id.to_string(),
-            exp: (now + Duration::seconds(self.email_verification_jwt_seconds)).timestamp() as usize,
+            exp: (now + Duration::seconds(self.email_verification_jwt_seconds)).timestamp()
+                as usize,
             iss: self.issuer.clone(),
             aud: AUD_EMAIL_VERIFY_PENDING.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -532,7 +548,10 @@ impl JwtService {
             .map_err(|e| AppError::Internal(format!("sign pending email verify jwt: {e}")))
     }
 
-    pub fn verify_pending_email_verification(&self, token: &str) -> Result<EmailVerifyClaims, AppError> {
+    pub fn verify_pending_email_verification(
+        &self,
+        token: &str,
+    ) -> Result<EmailVerifyClaims, AppError> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[AUD_EMAIL_VERIFY_PENDING]);
         validation.set_issuer(&[self.issuer.as_str()]);
@@ -562,8 +581,9 @@ impl JwtService {
         };
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(self.active_kid.clone());
-        let t = encode(&header, &claims, &self.encoding_key)
-            .map_err(|e| AppError::Internal(format!("sign embedded pending client totp jwt: {e}")))?;
+        let t = encode(&header, &claims, &self.encoding_key).map_err(|e| {
+            AppError::Internal(format!("sign embedded pending client totp jwt: {e}"))
+        })?;
         Ok((t, self.mfa_step_up_seconds as u64))
     }
 
@@ -601,12 +621,16 @@ impl JwtService {
         };
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(self.active_kid.clone());
-        let t = encode(&header, &claims, &self.encoding_key)
-            .map_err(|e| AppError::Internal(format!("sign client totp enroll after email jwt: {e}")))?;
+        let t = encode(&header, &claims, &self.encoding_key).map_err(|e| {
+            AppError::Internal(format!("sign client totp enroll after email jwt: {e}"))
+        })?;
         Ok((t, self.mfa_step_up_seconds as u64))
     }
 
-    pub fn verify_client_totp_enroll_after_email(&self, token: &str) -> Result<ClientTotpEnrollAfterEmailClaims, AppError> {
+    pub fn verify_client_totp_enroll_after_email(
+        &self,
+        token: &str,
+    ) -> Result<ClientTotpEnrollAfterEmailClaims, AppError> {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[AUD_CLIENT_TOTP_ENROLL_SETUP]);
         validation.set_issuer(&[self.issuer.as_str()]);
@@ -620,13 +644,7 @@ impl JwtService {
         tenant_id: Uuid,
         login_audience: &str,
     ) -> Result<(String, String), AppError> {
-        self.mint_mfa_stepup_token_ex(
-            user_id,
-            tenant_id,
-            login_audience,
-            "user",
-            None,
-        )
+        self.mint_mfa_stepup_token_ex(user_id, tenant_id, login_audience, "user", None)
     }
 
     /// Same as [`Self::mint_mfa_stepup_token`], with optional per-OAuth-client MFA context.
@@ -718,15 +736,10 @@ impl JwtService {
         self.decode_rsa(token, &validation)
     }
 
-    pub fn mint_idp_session(
-        &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
-    ) -> Result<String, AppError> {
-        let key = self
-            .hmac_key
-            .as_ref()
-            .ok_or_else(|| AppError::Config("idp session requires AUTH__COOKIE_SECRET (>= 32 bytes)".to_string()))?;
+    pub fn mint_idp_session(&self, user_id: Uuid, tenant_id: Uuid) -> Result<String, AppError> {
+        let key = self.hmac_key.as_ref().ok_or_else(|| {
+            AppError::Config("idp session requires AUTH__COOKIE_SECRET (>= 32 bytes)".to_string())
+        })?;
         let now = Utc::now();
         let iat = now.timestamp() as usize;
         let claims = IdpSessionClaims {
@@ -844,10 +857,10 @@ MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkj1e21KRq4jp+INs7GFDrfUf1+kvhhUlqbA6
 /// Embedded deferred-registration bearer tokens (pending email verify + pre-user client TOTP enrollment).
 #[cfg(test)]
 mod embedded_flow_token_tests {
-    use super::{JwtService, AUD_EMAIL_VERIFY_PENDING, AUD_EMBEDDED_PENDING_CLIENT_TOTP};
+    use super::{AUD_EMAIL_VERIFY_PENDING, AUD_EMBEDDED_PENDING_CLIENT_TOTP, JwtService};
     use rand::rngs::OsRng;
-    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
     use rsa::RsaPrivateKey;
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
     use uuid::Uuid;
 
     fn test_jwt() -> JwtService {
@@ -862,14 +875,8 @@ mod embedded_flow_token_tests {
             .to_public_key_pem(LineEnding::LF)
             .expect("pub pem")
             .to_string();
-        JwtService::from_pems_for_test(
-            "https://test-issuer.local",
-            &priv_pem,
-            &pub_pem,
-            600,
-            300,
-        )
-        .expect("jwt service")
+        JwtService::from_pems_for_test("https://test-issuer.local", &priv_pem, &pub_pem, 600, 300)
+            .expect("jwt service")
     }
 
     #[test]
@@ -925,5 +932,69 @@ mod embedded_flow_token_tests {
         assert_eq!(c.oauth_client_row_id, row.to_string());
         assert_eq!(c.public_oauth_client_id, "pub-client-id");
         assert_eq!(c.aud, AUD_EMBEDDED_PENDING_CLIENT_TOTP);
+    }
+}
+
+#[cfg(test)]
+mod ttl_override_mint_tests {
+    use super::JwtService;
+    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+    use rand::rngs::OsRng;
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    use uuid::Uuid;
+
+    #[test]
+    fn access_token_honors_ttl_override_seconds() {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa");
+        let priv_pem = private_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("pem")
+            .to_string();
+        let pub_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("pub pem")
+            .to_string();
+        let jwt = JwtService::from_pems_for_test(
+            "https://test-issuer.local",
+            &priv_pem,
+            &pub_pem,
+            600,
+            300,
+        )
+        .expect("jwt service");
+        let uid = Uuid::new_v4();
+        let tid = Uuid::new_v4();
+        let tok = jwt
+            .mint_access_token(
+                uid,
+                tid,
+                "my-aud",
+                vec![],
+                vec![],
+                true,
+                None,
+                None,
+                Some(222),
+            )
+            .expect("mint");
+        let dk = DecodingKey::from_rsa_pem(pub_pem.as_bytes()).expect("dec key");
+        let mut v = Validation::new(Algorithm::RS256);
+        v.validate_exp = false;
+        v.validate_aud = false;
+        let data = decode::<serde_json::Value>(&tok, &dk, &v).expect("decode");
+        let exp = data
+            .claims
+            .get("exp")
+            .and_then(|x| x.as_u64())
+            .expect("exp");
+        let iat = data
+            .claims
+            .get("iat")
+            .and_then(|x| x.as_u64())
+            .expect("iat");
+        assert_eq!(exp.saturating_sub(iat), 222);
     }
 }

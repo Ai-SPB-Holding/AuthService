@@ -1,4 +1,4 @@
-use argon2::password_hash::{rand_core::OsRng, SaltString};
+use argon2::password_hash::{SaltString, rand_core::OsRng};
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 
 /// Pinned Argon2id parameters (memory 19 MiB, 2 iterations, 1 lane) for passwords and client secrets.

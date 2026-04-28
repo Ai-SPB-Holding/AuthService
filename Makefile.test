@@ -1,0 +1,67 @@
+# Security / vulnerability harness (see test/README.md).
+# Requires: Docker, docker compose, make, python3, curl.
+
+TEST_SH := sh test/scripts
+
+.PHONY: help security-up security-down security-secrets security-sast security-deps \
+	security-images security-dast security-headers security-internal security-admin-escalation \
+	security-all
+
+help:
+	@echo "Security test targets (run from repo root):"
+	@echo "  make -f Makefile.test security-all      # full pipeline (static + docker + RBAC probe + scanners)"
+	@echo "  make -f Makefile.test security-up       # compose up + migrate + wait for health"
+	@echo "  make -f Makefile.test security-down     # compose down"
+	@echo "  make -f Makefile.test security-secrets  # gitleaks"
+	@echo "  make -f Makefile.test security-sast     # semgrep (ERROR severity gate)"
+	@echo "  make -f Makefile.test security-deps     # npm audit + cargo audit (High/Critical)"
+	@echo "  make -f Makefile.test security-images   # trivy image scan (High/Critical)"
+	@echo "  make -f Makefile.test security-dast     # OWASP ZAP baseline (ext + int)"
+	@echo "  make -f Makefile.test security-headers  # curl header smoke (external)"
+	@echo "  make -f Makefile.test security-internal # wget /health inside backend container"
+	@echo "  make -f Makefile.test security-admin-escalation  # optional RBAC probe (needs creds)"
+
+security-up:
+	@$(TEST_SH)/security-up.sh
+
+security-down:
+	@$(TEST_SH)/security-down.sh
+
+security-secrets:
+	@$(TEST_SH)/run-gitleaks.sh
+
+security-sast:
+	@$(TEST_SH)/run-semgrep.sh
+
+security-deps:
+	@$(TEST_SH)/run-npm-audit.sh
+	@$(TEST_SH)/run-cargo-audit.sh
+
+security-images:
+	@$(TEST_SH)/run-trivy-images.sh
+
+security-dast:
+	@$(TEST_SH)/run-zap-baseline.sh
+
+security-headers:
+	@$(TEST_SH)/run-headers-check.sh
+
+security-internal:
+	@$(TEST_SH)/run-internal-smoke.sh
+
+# Set ESCALATION_* env vars (see test/README.md).
+security-admin-escalation:
+	@test -n "$$ESCALATION_TENANT_ID" || (echo >&2 "set ESCALATION_TENANT_ID"; exit 2)
+	@test -n "$$ESCALATION_REGULAR_EMAIL" || (echo >&2 "set ESCALATION_REGULAR_EMAIL"; exit 2)
+	@test -n "$$ESCALATION_REGULAR_PASSWORD" || (echo >&2 "set ESCALATION_REGULAR_PASSWORD"; exit 2)
+	@python3 test/scripts/check-admin-privilege-escalation.py \
+		--base-url "$${BACKEND_EXTERNAL_URL:-http://127.0.0.1:8080}" \
+		--tenant-id "$$ESCALATION_TENANT_ID" \
+		--email "$$ESCALATION_REGULAR_EMAIL" \
+		--password "$$ESCALATION_REGULAR_PASSWORD" \
+		$$(test -n "$$ESCALATION_ADMIN_AUDIENCE" && echo --admin-audience "$$ESCALATION_ADMIN_AUDIENCE") \
+		$$(test -n "$$ESCALATION_WRONG_AUDIENCE" && echo --wrong-audience "$$ESCALATION_WRONG_AUDIENCE") \
+		$$(test -n "$$ESCALATION_ADMIN_EMAIL" && echo --admin-email "$$ESCALATION_ADMIN_EMAIL" --admin-password "$$ESCALATION_ADMIN_PASSWORD")
+
+security-all:
+	@$(TEST_SH)/security-all.sh

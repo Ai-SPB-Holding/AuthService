@@ -10,6 +10,7 @@ import {
   useGenerateClientIdMutation,
   useUpdateClientMutation,
 } from "@/features/clients/use-clients-query";
+import { useServiceSettingsQuery } from "@/features/settings/use-settings-query";
 import { getErrorMessage } from "@/shared/api/api-error";
 import type { MfaPolicy } from "@/features/clients/clients-api";
 import type { OAuthClientRow } from "@/shared/types/oauth-client";
@@ -40,6 +41,10 @@ type ClientForm = {
   embedded_protocol_v2: boolean;
   /** Whitelisted design tokens JSON (`{ "v": 1, ... }`); leave empty to use defaults */
   embedded_ui_theme_json: string;
+  /** Empty = use server default (`AUTH__ACCESS_TTL_SECONDS`). */
+  access_ttl_seconds: string;
+  /** Empty = use server default (`AUTH__REFRESH_TTL_SECONDS`). */
+  refresh_ttl_seconds: string;
   user_schema: { field_name: string; field_type: string; is_auth: boolean; is_required: boolean }[];
 };
 
@@ -84,6 +89,8 @@ const CLIENT_FORM_DEFAULTS: Required<ClientForm> = {
   embedded_parent_origins: [{ value: "" }],
   embedded_protocol_v2: false,
   embedded_ui_theme_json: "",
+  access_ttl_seconds: "",
+  refresh_ttl_seconds: "",
   user_schema: defaultSchema(),
 };
 
@@ -226,6 +233,20 @@ function assertSafeRedirectUris(uris: string[]) {
   }
 }
 
+/** Empty string → `null` (server default). */
+function parseOptionalTtlSeconds(raw: string, label: string): number | null {
+  const t = raw.trim();
+  if (t === "") return null;
+  if (!/^\d+$/.test(t)) {
+    throw new Error(`${label} must be digits only (seconds), or empty for server default.`);
+  }
+  const n = Number.parseInt(t, 10);
+  if (n > 2_147_483_647) {
+    throw new Error(`${label} is too large.`);
+  }
+  return n;
+}
+
 function buildPayload(values: ClientForm): {
   client_id?: string;
   client_type: "public" | "confidential";
@@ -241,6 +262,8 @@ function buildPayload(values: ClientForm): {
   user_schema: { field_name: string; field_type: string; is_auth: boolean; is_required: boolean }[];
   embedded_protocol_v2: boolean;
   embedded_ui_theme?: object;
+  access_ttl_seconds: number | null;
+  refresh_ttl_seconds: number | null;
 } {
   const redirect_urls = values.redirect_urls.map((x) => x.value.trim()).filter(Boolean);
   if (redirect_urls.length === 0) throw new Error("At least one redirect URL is required.");
@@ -273,6 +296,8 @@ function buildPayload(values: ClientForm): {
     user_schema: { field_name: string; field_type: string; is_auth: boolean; is_required: boolean }[];
     embedded_protocol_v2: boolean;
     embedded_ui_theme?: object;
+    access_ttl_seconds: number | null;
+    refresh_ttl_seconds: number | null;
   } = {
     client_id: values.client_id?.trim() || undefined,
     client_type: values.client_type,
@@ -285,6 +310,8 @@ function buildPayload(values: ClientForm): {
     embedded_token_audience: values.embedded_token_audience.trim(),
     embedded_parent_origins,
     embedded_protocol_v2: values.embedded_protocol_v2,
+    access_ttl_seconds: parseOptionalTtlSeconds(values.access_ttl_seconds, "Access token TTL"),
+    refresh_ttl_seconds: parseOptionalTtlSeconds(values.refresh_ttl_seconds, "Refresh token TTL"),
     user_schema: schema.map((f) => ({
       field_name: f.field_name.trim(),
       field_type: f.field_type.trim(),
@@ -320,6 +347,8 @@ function clientToForm(c: OAuthClientRow): ClientForm {
     embedded_parent_origins: normalizeEmbeddedOriginsField(c.embedded_parent_origins),
     embedded_protocol_v2: Boolean(c.embedded_protocol_v2),
     embedded_ui_theme_json: c.embedded_ui_theme != null ? JSON.stringify(c.embedded_ui_theme, null, 2) : "",
+    access_ttl_seconds: c.access_ttl_seconds != null ? String(c.access_ttl_seconds) : "",
+    refresh_ttl_seconds: c.refresh_ttl_seconds != null ? String(c.refresh_ttl_seconds) : "",
     user_schema: Array.isArray(c.user_schema)
       ? (c.user_schema as Array<{ field_name?: string; field_type?: string; is_auth?: boolean; is_required?: boolean }>).map((s) => ({
           field_name: s.field_name ?? "",
@@ -333,15 +362,27 @@ function clientToForm(c: OAuthClientRow): ClientForm {
 
 export function ClientsPage() {
   const { data, isLoading, error, isError, refetch } = useClientsQuery();
+  const { data: svcSettings } = useServiceSettingsQuery();
   const createM = useCreateClientMutation();
   const generateClientIdM = useGenerateClientIdMutation();
   const updateM = useUpdateClientMutation();
   const deleteM = useDeleteClientMutation();
 
+  const ttlHint = useMemo(() => {
+    if (!svcSettings) {
+      return "Leave empty to use server defaults (AUTH__ACCESS_TTL_SECONDS / AUTH__REFRESH_TTL_SECONDS).";
+    }
+    return `Leave empty for server defaults: access ${svcSettings.default_access_ttl_seconds}s, refresh ${svcSettings.default_refresh_ttl_seconds}s. Per-client max: access ≤ ${svcSettings.max_client_access_ttl_seconds}s, refresh ≤ ${svcSettings.max_client_refresh_ttl_seconds}s.`;
+  }, [svcSettings]);
+
   const [openCreate, setOpenCreate] = useState(false);
   const [editing, setEditing] = useState<OAuthClientRow | null>(null);
   const [deleting, setDeleting] = useState<OAuthClientRow | null>(null);
-  const [createdSecret, setCreatedSecret] = useState<{ clientId: string; clientSecret: string } | null>(null);
+  const [createdClient, setCreatedClient] = useState<{
+    clientId: string;
+    serverMetadataUrl: string;
+    clientSecret?: string;
+  } | null>(null);
 
   const formCreate = useForm<ClientForm>({
     defaultValues: CLIENT_FORM_DEFAULTS,
@@ -454,9 +495,11 @@ export function ClientsPage() {
                 const res = await createM.mutateAsync(payload);
                 setOpenCreate(false);
                 formCreate.reset(CLIENT_FORM_DEFAULTS);
-                if (res.client_secret) {
-                  setCreatedSecret({ clientId: res.client_id, clientSecret: res.client_secret });
-                }
+                setCreatedClient({
+                  clientId: res.client_id,
+                  serverMetadataUrl: res.server_metadata_url,
+                  clientSecret: res.client_secret,
+                });
               } catch (e) {
                 formCreate.setError("root", { message: getErrorMessage(e) });
               }
@@ -485,6 +528,14 @@ export function ClientsPage() {
               <option value="public">Public (PKCE)</option>
               <option value="confidential">Confidential (Client Secret)</option>
             </select>
+            <div className="rounded-md border border-slate-200 p-3 dark:border-slate-800">
+              <p className="mb-1 text-xs font-medium text-slate-600 dark:text-slate-400">Token lifetimes (OAuth2 / OIDC)</p>
+              <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">{ttlHint}</p>
+              <label className="mb-1 block text-xs text-slate-500">Access token TTL (seconds)</label>
+              <Input placeholder="default" inputMode="numeric" {...formCreate.register("access_ttl_seconds")} />
+              <label className="mb-1 mt-2 block text-xs text-slate-500">Refresh token TTL (seconds)</label>
+              <Input placeholder="default" inputMode="numeric" {...formCreate.register("refresh_ttl_seconds")} />
+            </div>
             <div>
               <label className="mb-2 block text-xs text-slate-500">Authorization scopes</label>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -621,15 +672,54 @@ export function ClientsPage() {
         </Modal>
       )}
 
-      {createdSecret && (
-        <Modal title="Client created (save secret now)" onClose={() => setCreatedSecret(null)}>
-          <p className="mb-2 text-sm text-slate-600 dark:text-slate-400">Client ID: <span className="font-mono">{createdSecret.clientId}</span></p>
-          <p className="mb-2 text-sm text-red-600 dark:text-red-400">This secret is shown only once.</p>
-          <textarea className="min-h-[88px] w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-900" readOnly value={createdSecret.clientSecret} />
-          <EmbeddedEmbedPanel clientId={createdSecret.clientId} />
-          <div className="mt-3 flex gap-2">
-            <Button type="button" variant="outline" onClick={async () => navigator.clipboard.writeText(createdSecret.clientSecret)}>Copy secret</Button>
-            <Button type="button" onClick={() => setCreatedSecret(null)}>Done</Button>
+      {createdClient && (
+        <Modal
+          title={createdClient.clientSecret ? "Client created (save secret now)" : "Client created"}
+          onClose={() => setCreatedClient(null)}
+        >
+          <p className="mb-2 text-sm text-slate-600 dark:text-slate-400">
+            Client ID: <span className="font-mono">{createdClient.clientId}</span>
+          </p>
+          <div className="mb-3 rounded-md border border-slate-200 p-2 dark:border-slate-700">
+            <p className="mb-1 text-xs font-medium text-slate-600 dark:text-slate-400">OIDC discovery (server metadata URL)</p>
+            <p className="mb-2 break-all font-mono text-xs text-slate-700 dark:text-slate-300">{createdClient.serverMetadataUrl}</p>
+            <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+              Point your SDK at this URL. If <code className="text-xs">OIDC__SERVER_METADATA_URL</code> is set on the server, the document may be
+              proxied from elsewhere; the URL is still the entry point for this deployment.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              className="text-xs"
+              onClick={async () => navigator.clipboard.writeText(createdClient.serverMetadataUrl)}
+            >
+              Copy metadata URL
+            </Button>
+          </div>
+          {createdClient.clientSecret ? (
+            <>
+              <p className="mb-2 text-sm text-red-600 dark:text-red-400">This secret is shown only once.</p>
+              <textarea
+                className="min-h-[88px] w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-900"
+                readOnly
+                value={createdClient.clientSecret}
+              />
+            </>
+          ) : null}
+          <EmbeddedEmbedPanel clientId={createdClient.clientId} />
+          <div className="mt-3 flex flex-wrap gap-2">
+            {createdClient.clientSecret ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={async () => createdClient.clientSecret && navigator.clipboard.writeText(createdClient.clientSecret)}
+              >
+                Copy secret
+              </Button>
+            ) : null}
+            <Button type="button" onClick={() => setCreatedClient(null)}>
+              Done
+            </Button>
           </div>
         </Modal>
       )}
@@ -664,6 +754,14 @@ export function ClientsPage() {
           >
             <Input placeholder="Client ID" {...formEdit.register("client_id", { required: true })} />
             <Input placeholder="Primary redirect URI" {...formEdit.register("redirect_urls.0.value", { required: true })} />
+            <div className="rounded-md border border-slate-200 p-3 dark:border-slate-800">
+              <p className="mb-1 text-xs font-medium text-slate-600 dark:text-slate-400">Token lifetimes (OAuth2 / OIDC)</p>
+              <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">{ttlHint}</p>
+              <label className="mb-1 block text-xs text-slate-500">Access token TTL (seconds)</label>
+              <Input placeholder="default" inputMode="numeric" {...formEdit.register("access_ttl_seconds")} />
+              <label className="mb-1 mt-2 block text-xs text-slate-500">Refresh token TTL (seconds)</label>
+              <Input placeholder="default" inputMode="numeric" {...formEdit.register("refresh_ttl_seconds")} />
+            </div>
             <div>
               <label className="mb-2 block text-xs text-slate-500">Authorization scopes</label>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">

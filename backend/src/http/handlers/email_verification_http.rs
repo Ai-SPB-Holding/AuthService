@@ -25,11 +25,12 @@ pub async fn send_code(
     if let Ok(c) = state.auth.jwt.verify_email_verification(tok) {
         let user_id = Uuid::parse_str(&c.sub).map_err(|_| AppError::Unauthorized)?;
         let tenant_id = Uuid::parse_str(&c.tenant_id).map_err(|_| AppError::Unauthorized)?;
-        let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&state.pool)
-            .await?;
+        let email: String =
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&state.pool)
+                .await?;
         let (jwt, exp) = state
             .ev
             .resend_registration(user_id, tenant_id, &email)
@@ -49,11 +50,12 @@ pub async fn send_code(
         }
         let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized)?;
         let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Unauthorized)?;
-        let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user_id)
-            .bind(tenant_id)
-            .fetch_one(&state.pool)
-            .await?;
+        let email: String =
+            sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(tenant_id)
+                .fetch_one(&state.pool)
+                .await?;
         let (jwt, exp) = state
             .ev
             .resend_registration(user_id, tenant_id, &email)
@@ -94,13 +96,7 @@ pub async fn verify_code(
     let verification_id = Uuid::parse_str(&c.jti).map_err(|_| AppError::Unauthorized)?;
     let pair = state
         .auth
-        .complete_email_verification(
-            user_id,
-            tenant_id,
-            verification_id,
-            &b.code,
-            &b.audience,
-        )
+        .complete_email_verification(user_id, tenant_id, verification_id, &b.code, &b.audience)
         .await?;
     let v = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(v))

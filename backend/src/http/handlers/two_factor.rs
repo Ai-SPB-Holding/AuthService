@@ -42,11 +42,12 @@ pub async fn setup_2fa(
     Extension(principal): Extension<BearerPrincipal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let (sub, tenant_id) = principal_user_tenant(&principal)?;
-    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
-        .bind(sub)
-        .bind(tenant_id)
-        .fetch_one(&state.pool)
-        .await?;
+    let email: String =
+        sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(sub)
+            .bind(tenant_id)
+            .fetch_one(&state.pool)
+            .await?;
     let (url, base32) = state.totp.begin_setup(sub, tenant_id, &email).await?;
     Ok(Json(serde_json::json!({
         "otpauth_url": url,
@@ -76,7 +77,9 @@ pub async fn verify_2fa(
             "expires_in": pair.expires_in,
         })));
     }
-    Ok(Json(serde_json::json!({ "ok": true, "totp_enabled": true })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "totp_enabled": true }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +96,9 @@ pub async fn disable_2fa(
     let sub = Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized)?;
     let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Unauthorized)?;
     state.totp.disable(sub, tenant_id, &b.code).await?;
-    Ok(Json(serde_json::json!({ "ok": true, "totp_enabled": false })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "totp_enabled": false }),
+    ))
 }
 
 /// POST /2fa/client/setup — TOTP for a specific OAuth client (see `client_user_mfa`).
@@ -106,7 +111,9 @@ pub async fn client_setup_2fa(
     let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Unauthorized)?;
     let public = b.oauth_client_id.trim();
     if public.is_empty() {
-        return Err(AppError::Validation("oauth_client_id is required".to_string()));
+        return Err(AppError::Validation(
+            "oauth_client_id is required".to_string(),
+        ));
     }
     let row = sqlx::query(
         "SELECT id, COALESCE(allow_client_totp_enrollment, true) AS allow_en
@@ -122,7 +129,10 @@ pub async fn client_setup_2fa(
     if !allow {
         return Err(AppError::Forbidden);
     }
-    let (url, base32) = state.totp.begin_client_setup(sub, tenant_id, id, public).await?;
+    let (url, base32) = state
+        .totp
+        .begin_client_setup(sub, tenant_id, id, public)
+        .await?;
     let actor = Uuid::parse_str(&claims.sub).ok();
     insert_audit_log(
         &state.pool,
@@ -151,7 +161,9 @@ pub async fn client_verify_2fa(
         .ok_or_else(|| AppError::Validation("oauth_client_id is required".to_string()))?
         .trim();
     if public.is_empty() {
-        return Err(AppError::Validation("oauth_client_id is required".to_string()));
+        return Err(AppError::Validation(
+            "oauth_client_id is required".to_string(),
+        ));
     }
     let code = b
         .get("code")
@@ -159,13 +171,17 @@ pub async fn client_verify_2fa(
         .ok_or_else(|| AppError::Validation("code is required".to_string()))?;
     let sub = Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized)?;
     let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Unauthorized)?;
-    let id: Uuid = sqlx::query_scalar("SELECT id FROM clients WHERE client_id = $1 AND tenant_id = $2")
-        .bind(public)
-        .bind(tenant_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or(AppError::Validation("unknown oauth_client_id".to_string()))?;
-    state.totp.complete_client_setup(sub, tenant_id, id, public, code).await?;
+    let id: Uuid =
+        sqlx::query_scalar("SELECT id FROM clients WHERE client_id = $1 AND tenant_id = $2")
+            .bind(public)
+            .bind(tenant_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(AppError::Validation("unknown oauth_client_id".to_string()))?;
+    state
+        .totp
+        .complete_client_setup(sub, tenant_id, id, public, code)
+        .await?;
     let actor = Uuid::parse_str(&claims.sub).ok();
     insert_audit_log(
         &state.pool,
@@ -176,7 +192,9 @@ pub async fn client_verify_2fa(
         Some(serde_json::json!({ "oauth_client_id": public, "self_service": true })),
     )
     .await;
-    Ok(Json(serde_json::json!({ "ok": true, "client_totp_enabled": true })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "client_totp_enabled": true }),
+    ))
 }
 
 /// POST /2fa/client/disable
@@ -191,7 +209,9 @@ pub async fn client_disable_2fa(
         .ok_or_else(|| AppError::Validation("oauth_client_id is required".to_string()))?
         .trim();
     if public.is_empty() {
-        return Err(AppError::Validation("oauth_client_id is required".to_string()));
+        return Err(AppError::Validation(
+            "oauth_client_id is required".to_string(),
+        ));
     }
     let code = b
         .get("code")
@@ -199,13 +219,17 @@ pub async fn client_disable_2fa(
         .ok_or_else(|| AppError::Validation("code is required".to_string()))?;
     let sub = Uuid::parse_str(&claims.sub).map_err(|_| AppError::Unauthorized)?;
     let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| AppError::Unauthorized)?;
-    let id: Uuid = sqlx::query_scalar("SELECT id FROM clients WHERE client_id = $1 AND tenant_id = $2")
-        .bind(public)
-        .bind(tenant_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or(AppError::Validation("unknown oauth_client_id".to_string()))?;
-    state.totp.disable_client(sub, tenant_id, id, public, code).await?;
+    let id: Uuid =
+        sqlx::query_scalar("SELECT id FROM clients WHERE client_id = $1 AND tenant_id = $2")
+            .bind(public)
+            .bind(tenant_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(AppError::Validation("unknown oauth_client_id".to_string()))?;
+    state
+        .totp
+        .disable_client(sub, tenant_id, id, public, code)
+        .await?;
     let actor = Uuid::parse_str(&claims.sub).ok();
     insert_audit_log(
         &state.pool,
@@ -216,5 +240,7 @@ pub async fn client_disable_2fa(
         Some(serde_json::json!({ "oauth_client_id": public, "self_service": true })),
     )
     .await;
-    Ok(Json(serde_json::json!({ "ok": true, "client_totp_enabled": false })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "client_totp_enabled": false }),
+    ))
 }

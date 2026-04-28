@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use chrono::Utc;
 use rand::Rng;
 use redis::AsyncCommands;
@@ -9,11 +9,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    config::AppConfig,
-    email::ExmailMailer,
+    config::AppConfig, email::ExmailMailer,
     repositories::email_verification_repository::EmailVerificationRepository,
-    repositories::user_repository::PostgresUserRepository,
-    security::jwt::JwtService,
+    repositories::user_repository::PostgresUserRepository, security::jwt::JwtService,
     services::errors::AppError,
 };
 
@@ -80,7 +78,7 @@ impl EmailVerificationService {
     }
 
     async fn rate_limit_send(&self, user_id: Uuid) -> Result<(), AppError> {
-        let key = format!("email:send:rate:{}", user_id);
+        let key = self.config.redis.key(&format!("email:send:rate:{user_id}"));
         let mut c = self.redis.clone();
         let n: i64 = c.incr(&key, 1).await?;
         if n == 1 {
@@ -93,7 +91,10 @@ impl EmailVerificationService {
     }
 
     async fn rate_limit_send_pending(&self, pending_id: Uuid) -> Result<(), AppError> {
-        let key = format!("email:send:rate:pending:{pending_id}");
+        let key = self
+            .config
+            .redis
+            .key(&format!("email:send:rate:pending:{pending_id}"));
         let mut c = self.redis.clone();
         let n: i64 = c.incr(&key, 1).await?;
         if n == 1 {
@@ -123,7 +124,9 @@ impl EmailVerificationService {
             .replace_code(id, user_id, tenant_id, &hash, exp, PURPOSE_REGISTER)
             .await?;
         self.mail.send_email_confirmation(email, &code_s).await?;
-        let jwt = self.jwt.mint_email_verification_token(user_id, tenant_id, id)?;
+        let jwt = self
+            .jwt
+            .mint_email_verification_token(user_id, tenant_id, id)?;
         let expires_in = self.config.totp.email_verification_jwt_ttl_seconds;
         Ok((id, jwt, expires_in))
     }
@@ -272,7 +275,10 @@ impl EmailVerificationService {
         if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
             return Err(AppError::Validation("code must be 6 digits".to_string()));
         }
-        let key = format!("email:verify:rate:pending:{pending_id}");
+        let key = self
+            .config
+            .redis
+            .key(&format!("email:verify:rate:pending:{pending_id}"));
         let mut c = self.redis.clone();
         let attempts: i64 = c.incr(&key, 1).await?;
         if attempts == 1 {
@@ -356,7 +362,10 @@ impl EmailVerificationService {
         if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
             return Err(AppError::Validation("code must be 6 digits".to_string()));
         }
-        let key = format!("email:verify:rate:{}", user_id);
+        let key = self
+            .config
+            .redis
+            .key(&format!("email:verify:rate:{user_id}"));
         let mut c = self.redis.clone();
         let attempts: i64 = c.incr(&key, 1).await?;
         if attempts == 1 {
@@ -369,7 +378,10 @@ impl EmailVerificationService {
         let Some(row) = self.ev.get_by_id(verification_id).await? else {
             return Err(AppError::Unauthorized);
         };
-        if row.user_id != Some(user_id) || row.tenant_id != tenant_id || row.pending_registration_id.is_some() {
+        if row.user_id != Some(user_id)
+            || row.tenant_id != tenant_id
+            || row.pending_registration_id.is_some()
+        {
             return Err(AppError::Unauthorized);
         }
         if Utc::now() > row.expires_at {
@@ -406,7 +418,10 @@ impl EmailVerificationService {
         tenant_id: Uuid,
         oauth_client_public: &str,
     ) -> Result<(), AppError> {
-        let key = format!("cte:bind:{user_id}:{tenant_id}");
+        let key = self
+            .config
+            .redis
+            .key(&format!("cte:bind:{user_id}:{tenant_id}"));
         let mut c = self.redis.clone();
         c.set_ex::<_, _, ()>(&key, oauth_client_public, 7200)
             .await
@@ -495,7 +510,10 @@ impl EmailVerificationService {
         if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
             return Err(AppError::Validation("code must be 6 digits".to_string()));
         }
-        let key = format!("email:verify:rate:{}", user_id);
+        let key = self
+            .config
+            .redis
+            .key(&format!("email:verify:rate:{user_id}"));
         let mut c = self.redis.clone();
         let attempts: i64 = c.incr(&key, 1).await?;
         if attempts == 1 {
@@ -504,11 +522,15 @@ impl EmailVerificationService {
         if attempts > 30 {
             return Err(AppError::Forbidden);
         }
-        let bind_key = format!("cte:bind:{user_id}:{tenant_id}");
+        let bind_key = self
+            .config
+            .redis
+            .key(&format!("cte:bind:{user_id}:{tenant_id}"));
         let mut c2 = self.redis.clone();
-        let expected_oauth: Option<String> = c2.get(&bind_key).await.map_err(|e| {
-            AppError::Internal(format!("redis cte:bind get: {e}"))
-        })?;
+        let expected_oauth: Option<String> = c2
+            .get(&bind_key)
+            .await
+            .map_err(|e| AppError::Internal(format!("redis cte:bind get: {e}")))?;
         let Some(expected) = expected_oauth else {
             return Err(AppError::Unauthorized);
         };
@@ -520,7 +542,10 @@ impl EmailVerificationService {
         let Some(row) = self.ev.get_by_id(verification_id).await? else {
             return Err(AppError::Unauthorized);
         };
-        if row.user_id != Some(user_id) || row.tenant_id != tenant_id || row.pending_registration_id.is_some() {
+        if row.user_id != Some(user_id)
+            || row.tenant_id != tenant_id
+            || row.pending_registration_id.is_some()
+        {
             return Err(AppError::Unauthorized);
         }
         if row.purpose != PURPOSE_CLIENT_TOTP_ENROLL_EMAIL {
@@ -547,9 +572,10 @@ impl EmailVerificationService {
         }
         self.ev.delete_by_id(verification_id).await?;
         let mut c3 = self.redis.clone();
-        let _: () = c3.del::<_, ()>(bind_key).await.map_err(|e| {
-            AppError::Internal(format!("redis cte:bind del: {e}"))
-        })?;
+        let _: () = c3
+            .del::<_, ()>(bind_key)
+            .await
+            .map_err(|e| AppError::Internal(format!("redis cte:bind del: {e}")))?;
         Ok(())
     }
 }
