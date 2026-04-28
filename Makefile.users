@@ -1,0 +1,83 @@
+COMPOSE := docker compose -f docker-compose.yml
+API_URL ?= http://localhost:8080
+TENANT_ID ?=
+# Required for `user-add` — JWT from dashboard login (or admin) with `aud` = AUTH__ADMIN_API_AUDIENCE and `admin` role
+ADMIN_BEARER ?=
+AUDIENCE ?= auth-service
+EMAIL ?=
+PASSWORD ?=
+USER_ID ?=
+ADMIN_ROLE ?= admin
+
+.PHONY: help user-list user-add user-delete user-block user-unblock user-promote-admin user-demote-admin user-2fa-init user-2fa-menu
+
+help:
+	@echo "User management commands:"
+	@echo "  make -f Makefile.users user-list TENANT_ID=<uuid>"
+	@echo "  make -f Makefile.users user-add EMAIL=<email> PASSWORD=<password>                   # needs ADMIN_BEARER=... (JWT) + new tenant auto-generated"
+	@echo "  make -f Makefile.users user-delete TENANT_ID=<uuid> USER_ID=<uuid>"
+	@echo "  make -f Makefile.users user-block TENANT_ID=<uuid> USER_ID=<uuid>"
+	@echo "  make -f Makefile.users user-unblock TENANT_ID=<uuid> USER_ID=<uuid>"
+	@echo "  make -f Makefile.users user-promote-admin TENANT_ID=<uuid> USER_ID=<uuid>"
+	@echo "  make -f Makefile.users user-demote-admin TENANT_ID=<uuid> USER_ID=<uuid>"
+	@echo "  make -f Makefile.users user-2fa-init TENANT_ID=<uuid> EMAIL=<email> PASSWORD=<pass> [USER_ID=<uuid>]  # headless TOTP via API; optional --code=123456 in script"
+	@echo "  make -f Makefile.users user-2fa-menu   # interactive (run from repo root; TENANT/EMAIL in prompts — ignore CLI vars for this target)"
+
+check-email:
+	@if [ -z "$(EMAIL)" ]; then echo "EMAIL is required"; exit 1; fi
+
+check-password:
+	@if [ -z "$(PASSWORD)" ]; then echo "PASSWORD is required"; exit 1; fi
+
+check-user-id:
+	@if [ -z "$(USER_ID)" ]; then echo "USER_ID is required"; exit 1; fi
+
+user-list:
+	$(COMPOSE) exec -T postgres psql -U auth -d auth -c "SELECT id, tenant_id, email, is_active, is_locked, email_verified FROM users WHERE tenant_id='$(TENANT_ID)'::uuid ORDER BY created_at DESC;"
+
+user-add: check-email check-password
+	@if [ -z "$(ADMIN_BEARER)" ]; then \
+		echo "ADMIN_BEARER is required: JWT with admin role and aud=$${AUDIENCE:-auth-service} (e.g. from dashboard login)."; \
+		echo "The token must be passed as: make ... ADMIN_BEARER=\"<token>\" user-add ..."; \
+		exit 1; \
+	fi; \
+	TENANT_ID_GEN=$$(uuidgen | tr '[:upper:]' '[:lower:]'); \
+	echo "Creating user via auth-service POST /auth/register (with admin bearer)..."; \
+	echo "Generated TENANT_ID=$${TENANT_ID_GEN}"; \
+		curl -sS -X POST "$(API_URL)/auth/register" \
+		-H "Content-Type: application/json" \
+		-H "Authorization: Bearer $(ADMIN_BEARER)" \
+		-d "{\"tenant_id\":\"$${TENANT_ID_GEN}\",\"email\":\"$(EMAIL)\",\"password\":\"$(PASSWORD)\",\"registration_source\":\"make-auth-service\"}" \
+		|| (echo "Failed to create user" && exit 1); \
+	echo; \
+	echo "Save this tenant for further commands:"; \
+	echo "TENANT_ID=$${TENANT_ID_GEN}"; \
+	echo "(Register only creates a user+tenant, not an OAuth client — add a client in the dashboard for per-app / per-client 2FA.)"
+	@echo
+
+user-delete: check-user-id
+	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "DELETE FROM users WHERE id='$(USER_ID)'::uuid AND tenant_id='$(TENANT_ID)'::uuid;"
+
+user-block: check-user-id
+	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "UPDATE users SET is_locked=true WHERE id='$(USER_ID)'::uuid AND tenant_id='$(TENANT_ID)'::uuid;"
+
+user-unblock: check-user-id
+	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "UPDATE users SET is_locked=false WHERE id='$(USER_ID)'::uuid AND tenant_id='$(TENANT_ID)'::uuid;"
+
+user-promote-admin: check-user-id
+	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "INSERT INTO roles (id, tenant_id, name) SELECT uuid_generate_v4(), '$(TENANT_ID)'::uuid, '$(ADMIN_ROLE)' WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id='$(TENANT_ID)'::uuid AND name='$(ADMIN_ROLE)');"
+	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "INSERT INTO user_roles (tenant_id, user_id, role_id) SELECT '$(TENANT_ID)'::uuid, '$(USER_ID)'::uuid, r.id FROM roles r WHERE r.tenant_id='$(TENANT_ID)'::uuid AND r.name='$(ADMIN_ROLE)' ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;"
+
+user-demote-admin: check-user-id
+	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "DELETE FROM user_roles ur USING roles r WHERE ur.role_id=r.id AND ur.tenant_id='$(TENANT_ID)'::uuid AND ur.user_id='$(USER_ID)'::uuid AND r.tenant_id='$(TENANT_ID)'::uuid AND r.name='$(ADMIN_ROLE)';"
+
+check-tenant:
+	@if [ -z "$(TENANT_ID)" ]; then echo "TENANT_ID is required"; exit 1; fi
+
+# Password login + POST /2fa/setup + /2fa/verify (stdlib Python). Run from repository root. Optional USER_ID: assert JWT sub after login.
+user-2fa-init: check-tenant check-email check-password
+	@sh scripts/2fa-enroll.sh --api-url "$(API_URL)" --tenant-id "$(TENANT_ID)" --email "$(EMAIL)" --password "$(PASSWORD)" --audience "$(AUDIENCE)" $(if $(USER_ID),--expect-user-id "$(USER_ID)",)
+
+# Interactive (paths resolved via scripts/2fa-menu.sh; run from repo root). See scripts/2fa-menu.sh
+user-2fa-menu:
+	@sh scripts/2fa-menu.sh

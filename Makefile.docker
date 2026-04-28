@@ -1,0 +1,65 @@
+COMPOSE := docker compose
+FILE := docker-compose.yml
+
+.PHONY: help build up down restart ps logs logs-backend logs-frontend shell-backend shell-db shell-redis migrate clean
+
+help:
+	@echo "Docker workflow commands:"
+	@echo "  make -f Makefile.docker build          # Build all services"
+	@echo "  make -f Makefile.docker up             # Start all services in background"
+	@echo "  make -f Makefile.docker down           # Stop and remove services"
+	@echo "  make -f Makefile.docker restart        # Restart all services"
+	@echo "  make -f Makefile.docker ps             # Show service status"
+	@echo "  make -f Makefile.docker logs           # Tail logs for all services"
+	@echo "  make -f Makefile.docker logs-backend   # Tail backend logs"
+	@echo "  make -f Makefile.docker logs-frontend  # Tail dashboard logs"
+	@echo "  make -f Makefile.docker shell-backend  # Open shell in backend container"
+	@echo "  make -f Makefile.docker shell-db       # Open psql shell"
+	@echo "  make -f Makefile.docker shell-redis    # Open redis-cli shell"
+	@echo "  make -f Makefile.docker migrate        # Run all backend/migrations/*.sql in order"
+	@echo "  make -f Makefile.docker clean          # Down + remove volumes"
+
+build:
+	$(COMPOSE) -f $(FILE) build
+
+up:
+	$(COMPOSE) -f $(FILE) up -d --build
+
+down:
+	$(COMPOSE) -f $(FILE) down
+
+restart:
+	$(COMPOSE) -f $(FILE) restart
+
+ps:
+	$(COMPOSE) -f $(FILE) ps
+
+logs:
+	$(COMPOSE) -f $(FILE) logs -f --tail=200
+
+logs-backend:
+	$(COMPOSE) -f $(FILE) logs -f --tail=200 backend
+
+logs-frontend:
+	$(COMPOSE) -f $(FILE) logs -f --tail=200 dashboard-ui
+
+shell-backend:
+	$(COMPOSE) -f $(FILE) exec backend /bin/sh
+
+shell-db:
+	$(COMPOSE) -f $(FILE) exec postgres psql -U auth -d auth
+
+shell-redis:
+	$(COMPOSE) -f $(FILE) exec redis redis-cli
+
+# Apply every .sql file under backend/migrations/ (0001, 0002, 0003, …). Idempotent IF NOT EXISTS / IF NOT EXISTS columns.
+MIGRATION_SQL := $(sort $(wildcard backend/migrations/*.sql))
+
+migrate:
+	@set -e; for f in $(MIGRATION_SQL); do \
+		echo "Applying $$f..."; \
+		$(COMPOSE) -f $(FILE) exec -T postgres psql -U auth -d auth < "$$f"; \
+	done
+
+clean:
+	$(COMPOSE) -f $(FILE) down -v --remove-orphans

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Profile — {{ settings.client_label }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; font-size: 0.85rem; }
+    nav a { margin-right: 1rem; }
+    .row { margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('index') }}">Login</a>
+    <a href="{{ url_for('register') }}">Register</a>
+    <a href="{{ url_for('profile') }}">Profile</a>
+  </nav>
+  <h1>Session profile</h1>
+  <p>Client: {{ settings.client_label }} — tokens stored in SQLite for this browser session.</p>
+  <p>Stored: email <code>{{ record.email or "—" }}</code>, sub <code>{{ record.sub or "—" }}</code></p>
+  <p class="row">Token preview: <code>{{ raw_stored.access_token_prefix }}</code> / <code>{{ raw_stored.refresh_token_prefix }}</code></p>
+
+  <h2>GET /userinfo (live)</h2>
+  {% if userinfo %}
+  <pre>{{ userinfo | tojson }}</pre>
+  {% else %}
+  <p>Could not load userinfo (token may be expired).</p>
+  {% endif %}
+
+  {% if settings.is_confidential and settings.oauth_client_secret %}
+  <h2>Confidential: OIDC refresh with client_secret</h2>
+  <p>Calls <code>POST {{ settings.auth_api_base }}/token</code> with <code>grant_type=refresh_token</code> and <code>client_secret</code> (demo only).</p>
+  <button type="button" id="btnRefresh">Refresh tokens via /token</button>
+  <pre id="refreshOut"></pre>
+  <script>
+    document.getElementById("btnRefresh").addEventListener("click", function () {
+      fetch("{{ url_for('oidc_refresh') }}", { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          document.getElementById("refreshOut").textContent = JSON.stringify(j, null, 2);
+          if (j.ok) window.location.reload();
+        })
+        .catch(function (e) {
+          document.getElementById("refreshOut").textContent = String(e);
+        });
+    });
+  </script>
+  {% endif %}
+
+  <form class="row" method="post" action="{{ url_for('logout') }}">
+    <button type="submit">Logout (revoke refresh + clear demo session)</button>
+  </form>
+</body>
+</html>

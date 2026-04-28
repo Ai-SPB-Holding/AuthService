@@ -19,3 +19,22 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+*.pem
+.env
+.env.local
+.env.*
+!.env.example
+!.env.iframe.example
+.env.prod
+jwt_private.pem
+jwt_public.pem
+
+.DS_Store
+
+# TypeScript SDK build output
+sdk/embedded-auth/dist/
+node_modules
+
+# Python
+__pycache__/

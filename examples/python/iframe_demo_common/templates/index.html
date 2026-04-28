@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Send Referer to the auth iframe so /embedded-login can match Parent origins -->
+  <meta name="referrer" content="origin-when-cross-origin" />
+  <title>Iframe login — {{ settings.client_label }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    .meta { color: #555; font-size: 0.9rem; }
+    iframe { width: 100%; min-height: 380px; border: 1px solid #ccc; border-radius: 8px; }
+    .err { color: #b00020; margin-top: 0.5rem; }
+    nav a { margin-right: 1rem; }
+    .toolbar { display: flex; gap: 0.5rem; margin: 0.75rem 0 0.5rem; }
+    .toolbar button { border: 1px solid #bbb; background: #f8f8f8; border-radius: 6px; padding: 0.45rem 0.7rem; cursor: pointer; }
+    .toolbar button:hover { background: #efefef; }
+  </style>
+</head>
+<body
+  data-auth-origin="{{ iframe_origin }}"
+  data-client-id="{{ settings.oauth_client_id }}"
+  data-callback-url="{{ url_for('auth_callback') }}"
+>
+  <nav>
+    <a href="{{ url_for('index') }}">Login</a>
+    <a href="{{ url_for('register') }}">Register</a>
+    <a href="{{ url_for('profile') }}">Profile</a>
+  </nav>
+  <h1>Embedded login ({{ settings.client_label }})</h1>
+  <p class="meta">OAuth <code>client_id</code>: <strong>{{ settings.oauth_client_id }}</strong>
+    {% if settings.is_confidential %} (confidential — secret used in <code>/demo/oidc-refresh</code>){% else %} (public / PKCE-style client){% endif %}
+  </p>
+  <p class="meta">Auth UI origin (postMessage + iframe): <code>{{ iframe_origin }}</code></p>
+  <p class="meta" style="background:#fff8e6;padding:0.75rem;border-radius:8px;font-size:0.85rem;">
+    <strong>Parent origins (admin → OAuth client):</strong> add <code>http://localhost:{{ settings.listen_port }}</code>
+    <em>and</em> <code>http://127.0.0.1:{{ settings.listen_port }}</code> (same port as this demo), plus
+    <code>{{ iframe_origin }}</code>. Open this page using the <strong>same</strong> hostname you listed
+    (<code>localhost</code> vs <code>127.0.0.1</code> are different origins).
+  </p>
+  <p class="meta" style="background:#eef8ff;padding:0.75rem;border-radius:8px;font-size:0.85rem;">
+    <strong>SDK demo:</strong> кнопки ниже отправляют <code>THEME_UPDATE</code> в iframe через SDK.
+    Для переключения темы нужен <code>embedded_protocol_v2=true</code> у OAuth клиента.
+  </p>
+  <div class="toolbar">
+    <button id="btnDefaultTheme" type="button">Server default theme</button>
+    <button id="btnCustomTheme" type="button">Client custom theme</button>
+  </div>
+  <p id="status" class="err" role="status"></p>
+  <div id="authMount"></div>
+  <script src="{{ url_for('static', filename='embedded-auth-sdk-demo.js') }}"></script>
+  <script>
+    (function () {
+      var pageData = document.body.dataset;
+      var statusEl = document.getElementById("status");
+      var mount = document.getElementById("authMount");
+      var authOrigin = String(pageData.authOrigin || "");
+      var callbackUrl = String(pageData.callbackUrl || "");
+      var clientId = String(pageData.clientId || "");
+      // postMessage ev.origin is the iframe document origin; if the page was opened as
+      // localhost but AUTH_PUBLIC_ORIGIN is 127.0.0.1 (or vice versa), a single-string allowlist drops AUTH_SUCCESS.
+      function loopbackAuthOrigins(primary) {
+        try {
+          var u = new URL(primary);
+          var h = (u.hostname || "").toLowerCase();
+          if (h !== "localhost" && h !== "127.0.0.1") return [primary];
+          var port = u.port ? ":" + u.port : "";
+          return [
+            u.protocol + "//localhost" + port,
+            u.protocol + "//127.0.0.1" + port,
+          ];
+        } catch (e) {
+          return [primary];
+        }
+      }
+
+      var sdk = window.EmbeddedAuthSdkDemo.createEmbeddedAuth({
+        issuer: authOrigin,
+        clientId: clientId,
+        allowedMessageOrigins: loopbackAuthOrigins(authOrigin),
+        onReady: function () {
+          // if protocol v2 enabled on server, iframe responds INIT_ACK and accepts THEME_UPDATE.
+          sdk.initHandshake();
+        },
+        onError: function (e) {
+          statusEl.textContent = "Auth error: " + (e.error || "unknown");
+        },
+        onSuccess: function (tokens) {
+          if (!tokens || !tokens.access_token) return;
+          statusEl.textContent = "Saving session…";
+          fetch(callbackUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              access_token: tokens.access_token,
+              refresh_token: tokens.refresh_token || null,
+            }),
+          })
+            .then(function (r) { return r.json(); })
+            .then(function (body) {
+              if (body.redirect) {
+                window.location.href = body.redirect;
+              } else {
+                statusEl.textContent = "Unexpected response";
+              }
+            })
+            .catch(function (e) {
+              statusEl.textContent = "Callback failed: " + e;
+            });
+        },
+      });
+
+      mount.appendChild(sdk.iframe);
+      sdk.load();
+
+      var defaultTheme = {
+        v: 1,
+        colorScheme: "light",
+      };
+      var customTheme = {
+        v: 1,
+        colorScheme: "dark",
+        colors: {
+          primary: "#7c3aed",
+          onPrimary: "#ffffff",
+          background: "#0f172a",
+          surface: "#1e293b",
+          error: "#ef4444"
+        },
+        radius: { md: 12 },
+        spacing: { md: 12 },
+        font: { family: "mono", size: "md" }
+      };
+
+      document.getElementById("btnDefaultTheme").addEventListener("click", function () {
+        sdk.updateTheme(defaultTheme);
+        statusEl.textContent = "Sent THEME_UPDATE: server default/light preset";
+      });
+      document.getElementById("btnCustomTheme").addEventListener("click", function () {
+        sdk.updateTheme(customTheme);
+        statusEl.textContent = "Sent THEME_UPDATE: client custom dark theme";
+      });
+
+    })();
+  </script>
+</body>
+</html>

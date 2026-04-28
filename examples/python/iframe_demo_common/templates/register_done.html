@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Registered</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <h1>Registration response</h1>
+  <p>Auth Service returns an email-verification payload (if enabled). Complete verification in your deployment, then use <a href="{{ url_for('index') }}">Login</a>.</p>
+  <pre>{{ register_json_pretty }}</pre>
+</body>
+</html>
