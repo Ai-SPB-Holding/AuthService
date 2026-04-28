@@ -469,11 +469,7 @@ async fn validate_embedded_csrf_and_origin(
     csrf_body: &str,
     consume_csrf: bool,
 ) -> Result<EmbeddedValidated, Response> {
-    let ip = client_ip(
-        headers,
-        conn,
-        state.config.auth.trust_x_forwarded_for,
-    );
+    let ip = client_ip(headers, conn, state.config.auth.trust_x_forwarded_for);
     if let Err(resp) = check_ip_limit(state, &ip).await {
         return Err(resp);
     }

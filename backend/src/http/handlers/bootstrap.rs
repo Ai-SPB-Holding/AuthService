@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use axum::{Json, extract::State};
 use axum::http::{StatusCode, header::AUTHORIZATION};
 use axum::response::{IntoResponse, Response};
+use axum::{Json, extract::State};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::services::app_state::AppState;
-use crate::services::errors::AppError;
 use crate::services::auth_service::RegisterCommand;
+use crate::services::errors::AppError;
 
 #[derive(Debug, Deserialize)]
 pub struct BootstrapAdminRequest {
@@ -105,4 +105,3 @@ pub async fn bootstrap_admin(
     )
         .into_response())
 }
-
