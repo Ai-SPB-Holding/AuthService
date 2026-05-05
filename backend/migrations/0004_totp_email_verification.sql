@@ -1,12 +1,14 @@
+CREATE SCHEMA IF NOT EXISTS auth;
+
 -- TOTP 2FA + email confirmation codes
-ALTER TABLE users
+ALTER TABLE auth.users
     ADD COLUMN IF NOT EXISTS totp_secret_enc BYTEA,
     ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS totp_enabled_at TIMESTAMPTZ;
 
-CREATE TABLE IF NOT EXISTS email_verifications (
+CREATE TABLE IF NOT EXISTS auth.email_verifications (
     id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
     code_hash TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     attempts INT NOT NULL DEFAULT 0,
@@ -16,10 +18,10 @@ CREATE TABLE IF NOT EXISTS email_verifications (
 );
 
 CREATE INDEX IF NOT EXISTS email_verifications_user_purpose
-    ON email_verifications (user_id, purpose);
+    ON auth.email_verifications (user_id, purpose);
 
 CREATE INDEX IF NOT EXISTS email_verifications_expires
-    ON email_verifications (expires_at);
+    ON auth.email_verifications (expires_at);
 
 CREATE INDEX IF NOT EXISTS email_verifications_tenant
-    ON email_verifications (tenant_id);
+    ON auth.email_verifications (tenant_id);

@@ -42,6 +42,16 @@
       if (data.v === 1 && data.type === "SESSION_ENDED" && options.onSessionEnded) {
         options.onSessionEnded(data);
       }
+      if (data.type === "AUTH_SUCCESS" && data.code) {
+        if (options.onSuccess) {
+          options.onSuccess({
+            embedded_session_code: String(data.code),
+            expires_in: data.expires_in,
+            token_type: data.token_type,
+          });
+        }
+        return;
+      }
       if (data.type === "AUTH_SUCCESS" && data.access_token) {
         if (options.onSuccess) {
           options.onSuccess({
@@ -63,6 +73,7 @@
     function load() {
       var src = new URL(joinUrl(options.issuer, "/embedded-login"));
       src.searchParams.set("client_id", options.clientId);
+      src.searchParams.set("_pv", String(Date.now()));
       iframe.src = src.toString();
     }
 

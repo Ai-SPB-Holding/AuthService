@@ -1,4 +1,4 @@
-name: authservice-sdk
+name: authservice
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
     paths:
       - "backend/**"
-      - ".github/workflows/authservice-sdk.yml"
+      - ".github/workflows/authservice.yml"
 
 env:
   CARGO_TERM_COLOR: always

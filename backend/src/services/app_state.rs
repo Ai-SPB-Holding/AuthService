@@ -30,6 +30,15 @@ impl AppState {
     pub async fn build(config: AppConfig) -> Result<Self, AppError> {
         let pool = PgPoolOptions::new()
             .max_connections(config.database.pool_size)
+            // Migrations create objects in `auth` schema; queries use unqualified table names.
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SET search_path = auth, public")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok::<(), sqlx::Error>(())
+                })
+            })
             .connect(&config.database.url)
             .await?;
 

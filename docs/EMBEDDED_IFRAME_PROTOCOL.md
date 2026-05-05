@@ -32,16 +32,31 @@ Additional fields are type-specific. Implementations SHOULD reject unknown `v` f
 | `THEME_UPDATE`  | parent → iframe  | `theme` object (see [Theme object](#theme-object-embedded_ui_theme--runtime)); merged at runtime. |
 | `LOGOUT`        | parent → iframe  | UIO only: ask iframe to clear visible forms; server refresh revocation remains `POST /auth/logout` with the refresh token on the **parent** or BFF. |
 | `SESSION_ENDED` | iframe → parent  | Optional notice after `LOGOUT` handling in iframe. |
-| `AUTH_SUCCESS`  | iframe → parent  | `access_token`, `refresh_token`; optional `expires_in` if API returns it. Envelope + token fields. |
+| `AUTH_SUCCESS`  | iframe → parent  | **BFF (recommended):** `code`, `token_type` (`embedded_session`), `expires_in` for the one-time code (minted server-side after login; parent exchanges via `POST /oauth2/token` with `grant_type=embedded_session`). **Legacy:** `access_token`, optional `refresh_token` (may be omitted). Envelope + fields. |
 | `AUTH_ERROR`    | iframe → parent  | `error` (machine code), `message` (human-readable). Envelope + error fields. |
 
 ## Handshake (recommended, v2)
 
-1. Iframe dispatches `EMBED_READY` with a fresh `nonce_iframe` (also in the envelope as `nonce`).
+1. Iframe dispatches `EMBED_READY` with a fresh `nonce_iframe` (also in the envelope as `nonce`).  
+   **Note:** In strict browsers (Safari / third‑party cookie blocking), the iframe may show an **“Allow cookies”** step first and only send `EMBED_READY` after the HttpOnly CSRF cookie is available (`GET /api/embedded/csrf-check` returns 204), possibly after `document.requestStorageAccess()`.
 2. Parent sends `INIT` with a new `nonce` and, if desired, `parent_origin: window.location.origin`.
 3. Iframe responds with `INIT_ACK` with `allowed: true` if `event.origin` is in the allowlist, else `allowed: false`.
 
 The iframe will still complete login; `INIT` is for SDK alignment and gating of optional behavior.
+
+## return_to and new-tab sign-in
+
+Optional query parameter on `GET /embedded-login`:
+
+`return_to=<absolute-URL>`
+
+- The URL must use `http` or `https`, must not include userinfo, and its **origin** must match one of the client’s `embedded_parent_origins` patterns (same rules as parent origin checks).
+- The Auth Service injects it into the page `CFG` as `return_to` when valid; invalid values are ignored.
+- After a successful BFF session-code mint, if `CFG.return_to` is set, the browser is sent to  
+  `return_to#embedded_session_code=<one_time_code>`  
+  then `window.close()` is attempted (works when the tab was opened via `window.open`; harmless otherwise).
+- The host SPA should read the hash, call its BFF `POST .../embedded/exchange` with `code`, then strip the hash with `history.replaceState`.
+- `@auth-service/embedded-auth`: pass `returnTo` in options; `load()` sends it as the `return_to` query param.
 
 ## Theme object (`embedded_ui_theme` + runtime)
 
@@ -71,10 +86,22 @@ The Auth Service **validates and stores** `embedded_ui_theme` on the client. Run
 
 The iframe posts:
 
-- Success: `{ "type": "AUTH_SUCCESS", "access_token": "...", "refresh_token": "..." }`
+- Success (BFF): `{ "type": "AUTH_SUCCESS", "code": "...", "token_type": "embedded_session", "expires_in": 120 }`
+- Success (legacy): `{ "type": "AUTH_SUCCESS", "access_token": "...", "refresh_token": "..." }`
 - Error: `{ "type": "AUTH_ERROR", "error": "CODE", "message": "..." }`
 
 No `v` / `ts` / `nonce` / `source` fields. Parents must not assume envelope fields.
+
+## Production checks (Safari / CSRF)
+
+Symptom **`csrf mismatch`** on `POST /api/login` means the browser sent an `embedded_csrf` cookie, but **no cookie value matched** the `csrf_token` in the JSON body (often stale iframe HTML vs cookie jar after BFCache / ITP).
+
+Verify:
+
+1. **`GET /embedded-login` response** includes `Cache-Control: no-store` (Auth Service sets this) and **two** `Set-Cookie` lines for `embedded_csrf` (clear then set). Do not cache this URL on CDN or nginx `proxy_cache`.
+2. **HTTPS issuer** so the CSRF cookie is `SameSite=None; Secure` (required for third-party iframe POSTs).
+3. **Reverse proxy** must forward all `Set-Cookie` headers to the client without merging; do not strip cookies for `/embedded-login` or `/api/*`.
+4. **SDK / parent**: `@auth-service/embedded-auth` `load()` adds `_pv` and optional `return_to` (see [return_to and new-tab sign-in](#return_to-and-new-tab-sign-in)); parents that set `iframe.src` manually should mirror that behavior.
 
 ## JSON Schema (informative)
 

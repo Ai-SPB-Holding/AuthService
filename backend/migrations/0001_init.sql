@@ -1,6 +1,8 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-CREATE TABLE IF NOT EXISTS users (
+CREATE SCHEMA IF NOT EXISTS auth;
+
+CREATE TABLE IF NOT EXISTS auth.users (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     email TEXT NOT NULL,
@@ -11,16 +13,16 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE(tenant_id, email)
 );
 
-CREATE TABLE IF NOT EXISTS credentials (
+CREATE TABLE IF NOT EXISTS auth.credentials (
     user_id UUID NOT NULL,
     tenant_id UUID NOT NULL,
     password_hash TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY(user_id, tenant_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS clients (
+CREATE TABLE IF NOT EXISTS auth.clients (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     client_id TEXT NOT NULL,
@@ -30,7 +32,7 @@ CREATE TABLE IF NOT EXISTS clients (
     UNIQUE(tenant_id, client_id)
 );
 
-CREATE TABLE IF NOT EXISTS auth_codes (
+CREATE TABLE IF NOT EXISTS auth.auth_codes (
     code TEXT PRIMARY KEY,
     tenant_id UUID NOT NULL,
     user_id UUID NOT NULL,
@@ -42,7 +44,7 @@ CREATE TABLE IF NOT EXISTS auth_codes (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS refresh_tokens (
+CREATE TABLE IF NOT EXISTS auth.refresh_tokens (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     user_id UUID NOT NULL,
@@ -52,35 +54,35 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS roles (
+CREATE TABLE IF NOT EXISTS auth.roles (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     name TEXT NOT NULL,
     UNIQUE(tenant_id, name)
 );
 
-CREATE TABLE IF NOT EXISTS permissions (
+CREATE TABLE IF NOT EXISTS auth.permissions (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     name TEXT NOT NULL,
     UNIQUE(tenant_id, name)
 );
 
-CREATE TABLE IF NOT EXISTS user_roles (
+CREATE TABLE IF NOT EXISTS auth.user_roles (
     tenant_id UUID NOT NULL,
     user_id UUID NOT NULL,
     role_id UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tenant_id, user_id, role_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
+    PRIMARY KEY(tenant_id, user_id, role_id),
+    FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES auth.roles(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS role_permissions (
+CREATE TABLE IF NOT EXISTS auth.role_permissions (
     tenant_id UUID NOT NULL,
     role_id UUID NOT NULL,
     permission_id UUID NOT NULL,
-    PRIMARY KEY (tenant_id, role_id, permission_id),
-    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
-    FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE
+    PRIMARY KEY(tenant_id, role_id, permission_id),
+    FOREIGN KEY (role_id) REFERENCES auth.roles(id) ON DELETE CASCADE,
+    FOREIGN KEY (permission_id) REFERENCES auth.permissions(id) ON DELETE CASCADE
 );

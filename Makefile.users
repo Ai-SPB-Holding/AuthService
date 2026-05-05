@@ -65,7 +65,7 @@ user-unblock: check-user-id
 	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "UPDATE users SET is_locked=false WHERE id='$(USER_ID)'::uuid AND tenant_id='$(TENANT_ID)'::uuid;"
 
 user-promote-admin: check-user-id
-	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "INSERT INTO roles (id, tenant_id, name) SELECT uuid_generate_v4(), '$(TENANT_ID)'::uuid, '$(ADMIN_ROLE)' WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id='$(TENANT_ID)'::uuid AND name='$(ADMIN_ROLE)');"
+	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "INSERT INTO roles (id, tenant_id, name) SELECT gen_random_uuid(), '$(TENANT_ID)'::uuid, '$(ADMIN_ROLE)' WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id='$(TENANT_ID)'::uuid AND name='$(ADMIN_ROLE)');"
 	$(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U auth -d auth -c "INSERT INTO user_roles (tenant_id, user_id, role_id) SELECT '$(TENANT_ID)'::uuid, '$(USER_ID)'::uuid, r.id FROM roles r WHERE r.tenant_id='$(TENANT_ID)'::uuid AND r.name='$(ADMIN_ROLE)' ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;"
 
 user-demote-admin: check-user-id

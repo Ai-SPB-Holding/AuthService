@@ -101,6 +101,10 @@ pub async fn build_router(config: AppConfig) -> Result<Router, crate::services::
         .layer(oauth_rate_limit.clone());
 
     let embedded_api_routes = Router::new()
+        .route(
+            "/api/embedded/csrf-check",
+            get(embedded_login::embedded_csrf_check),
+        )
         .route("/api/login", post(embedded_login::embedded_login_api))
         .route(
             "/api/session-code",

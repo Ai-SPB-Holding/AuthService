@@ -1656,7 +1656,7 @@ impl<R: UserRepository> AuthService<R> {
         .await?;
 
         let c_row = sqlx::query(
-            "SELECT id, client_type, client_secret_argon2, token_endpoint_auth_method
+            "SELECT id, client_type, client_secret_argon2, token_endpoint_auth_method, embedded_token_audience
              FROM clients WHERE client_id = $1 AND tenant_id = $2",
         )
         .bind(oauth_client_public_id)
@@ -1664,6 +1664,12 @@ impl<R: UserRepository> AuthService<R> {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(AppError::Validation("unknown client".to_string()))?;
+        let aud_override: Option<String> = c_row.try_get("embedded_token_audience").ok().flatten();
+        let embedded_access_audience = aud_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(oauth_client_public_id);
         let ctype: String = c_row
             .try_get::<String, _>("client_type")
             .unwrap_or_else(|_| "public".to_string());
@@ -1700,10 +1706,15 @@ impl<R: UserRepository> AuthService<R> {
             .load_permission_names(tenant_id, user_id)
             .await
             .unwrap_or_default();
+        // For embedded iframe session exchange, the access token audience must match the embedded
+        // client's configured audience (`embedded_token_audience` or public `client_id`), not the
+        // server's global default. Keep `access_audience` param for backward compatibility, but
+        // ignore it here.
+        let _ = access_audience;
         self.issue_tokens(
             user_id,
             tenant_id,
-            access_audience,
+            embedded_access_audience,
             roles,
             perms,
             None,

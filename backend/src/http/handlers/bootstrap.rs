@@ -75,7 +75,7 @@ pub async fn bootstrap_admin(
     // Promote to admin role in DB (same logic as Makefile.release user-promote-admin).
     sqlx::query(
         "INSERT INTO roles (id, tenant_id, name)
-         SELECT uuid_generate_v4(), $1, 'admin'
+         SELECT gen_random_uuid(), $1, 'admin'
          WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id = $1 AND name = 'admin')",
     )
     .bind(tenant_id)

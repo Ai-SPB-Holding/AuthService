@@ -56,7 +56,7 @@ user-add: check-email check-password check-admin-bearer
 # Promote existing user to admin role in DB (requires psql + DATABASE_URL env on the server).
 user-promote-admin: check-tenant check-user-id
 	@if [ -z "$${DATABASE_URL:-}" ]; then echo "DATABASE_URL env is required (postgres://...)"; exit 1; fi
-	@psql "$${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO roles (id, tenant_id, name) SELECT uuid_generate_v4(), '$(TENANT_ID)'::uuid, '$(ADMIN_ROLE)' WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id='$(TENANT_ID)'::uuid AND name='$(ADMIN_ROLE)');"
+	@psql "$${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO roles (id, tenant_id, name) SELECT gen_random_uuid(), '$(TENANT_ID)'::uuid, '$(ADMIN_ROLE)' WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id='$(TENANT_ID)'::uuid AND name='$(ADMIN_ROLE)');"
 	@psql "$${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO user_roles (tenant_id, user_id, role_id) SELECT '$(TENANT_ID)'::uuid, '$(USER_ID)'::uuid, r.id FROM roles r WHERE r.tenant_id='$(TENANT_ID)'::uuid AND r.name='$(ADMIN_ROLE)' ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;"
 
 server-check:

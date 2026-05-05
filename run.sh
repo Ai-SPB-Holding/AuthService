@@ -387,7 +387,6 @@ cmd_init() {
 cmd_start() {
   init_config_from_env
   start_backend
-  start_nginx
 }
 
 cmd_stop() {

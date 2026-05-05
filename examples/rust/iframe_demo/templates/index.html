@@ -71,15 +71,23 @@
           statusEl.textContent = "Auth error: " + (e.error || "unknown");
         },
         onSuccess: function (tokens) {
-          if (!tokens || !tokens.access_token) return;
+          if (!tokens) return;
+          var body;
+          if (tokens.embedded_session_code) {
+            body = { code: tokens.embedded_session_code };
+          } else if (tokens.access_token) {
+            body = {
+              access_token: tokens.access_token,
+              refresh_token: tokens.refresh_token || null,
+            };
+          } else {
+            return;
+          }
           statusEl.textContent = "Saving session…";
           fetch(callbackUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              access_token: tokens.access_token,
-              refresh_token: tokens.refresh_token || null,
-            }),
+            body: JSON.stringify(body),
           })
             .then(function (r) { return r.json(); })
             .then(function (body) {

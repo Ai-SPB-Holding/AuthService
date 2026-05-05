@@ -22,9 +22,13 @@ const { iframe, load, initHandshake, destroy, updateTheme, logout } = createEmbe
   issuer: "https://auth.example.com",
   clientId: "myclient",
   allowedMessageOrigins: ["https://app.example.com", "https://auth.example.com"],
-  onSuccess: ({ access_token, expires_in }) => {
-    // Short-lived access_token only — no refresh_token in the iframe. For production, call your BFF with
-    // `POST /api/session-code` (Bearer access_token + CSRF) then `POST /oauth2/token` with `grant_type=embedded_session`.
+  onSuccess: (payload) => {
+    // BFF: `embedded_session_code` from iframe (`AUTH_SUCCESS`); legacy: `access_token` only.
+    if (payload.embedded_session_code) {
+      // POST to your backend with `grant_type=embedded_session` …
+      return;
+    }
+    // …
   },
   onError: (e) => console.warn(e),
   onReady: () => {

@@ -1,0 +1,52 @@
+services:
+  aauth:
+    image: igorrw/aauth:full
+    container_name: aauth
+    ports:
+      - "8088:80"
+    environment:
+      # AuthService runtime
+      SERVER__HOST: 0.0.0.0
+      SERVER__PORT: 8080
+      SERVER__ISSUER: http://localhost:8088
+
+      # Dependencies (inside compose network)
+      DATABASE__URL: postgres://auth:auth@postgres:5432/auth
+      REDIS__URL: redis://redis:6379
+
+      # Required secret (set strong random hex in real env)
+      AUTH__COOKIE_SECRET: REPLACE_WITH_RANDOM_64_HEX
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: aauth-postgres
+    environment:
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: auth
+      POSTGRES_DB: auth
+    ports:
+      - "5434:5432"
+    volumes:
+      - aauth_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth -d auth -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: aauth-redis
+    ports:
+      - "6378:6379"
+    restart: unless-stopped
+
+volumes:
+  aauth_pgdata:

@@ -22,8 +22,24 @@ export type EmbeddedAuthOptions = {
    * and match `embedded_parent_origins` in the admin UI (plus your app origin for INIT).
    */
   allowedMessageOrigins: string[];
-  /** Called for successful v2 or legacy `AUTH_SUCCESS`. `refresh_token` may be absent in the iframe (server strips it). */
-  onSuccess?: (tokens: { access_token: string; refresh_token?: string }) => void;
+  /**
+   * Absolute URL of the host app (e.g. `https://mail.example.com/login`). Must match an
+   * `embedded_parent_origins` entry. Enables “Open sign-in in a new tab”: after success the IdP
+   * redirects here with `#embedded_session_code=<code>` for the SPA to BFF-exchange.
+   */
+  returnTo?: string;
+  /**
+   * Successful `AUTH_SUCCESS` from iframe.
+   * - **BFF:** `embedded_session_code` + optional `expires_in` (parent exchanges at `/oauth2/token` with `grant_type=embedded_session`).
+   * - **Legacy:** `access_token` (+ optional `refresh_token`).
+   */
+  onSuccess?: (payload: {
+    access_token?: string;
+    refresh_token?: string;
+    embedded_session_code?: string;
+    expires_in?: number;
+    token_type?: string;
+  }) => void;
   onError?: (err: { error: string; message: string; raw: unknown }) => void;
   onReady?: (ev: IframeMessageV1) => void;
   onSessionEnded?: (ev: IframeMessageV1) => void;
@@ -63,6 +79,14 @@ export function createEmbeddedAuth(options: EmbeddedAuthOptions) {
       const msg = data as IframeMessageV1;
       if (msg.type === "EMBED_READY" && options.onReady) options.onReady(msg);
       if (msg.type === "SESSION_ENDED" && options.onSessionEnded) options.onSessionEnded(msg);
+      if (msg.type === "AUTH_SUCCESS" && typeof o.code === "string") {
+        options.onSuccess?.({
+          embedded_session_code: o.code,
+          expires_in: typeof o.expires_in === "number" ? o.expires_in : undefined,
+          token_type: typeof o.token_type === "string" ? o.token_type : undefined,
+        });
+        return;
+      }
       if (msg.type === "AUTH_SUCCESS" && typeof o.access_token === "string") {
         options.onSuccess?.({
           access_token: o.access_token,
@@ -78,6 +102,14 @@ export function createEmbeddedAuth(options: EmbeddedAuthOptions) {
         });
       }
     } else {
+      if (o.type === "AUTH_SUCCESS" && typeof o.code === "string") {
+        options.onSuccess?.({
+          embedded_session_code: o.code,
+          expires_in: typeof o.expires_in === "number" ? o.expires_in : undefined,
+          token_type: typeof o.token_type === "string" ? o.token_type : undefined,
+        });
+        return;
+      }
       if (o.type === "AUTH_SUCCESS" && typeof o.access_token === "string") {
         options.onSuccess?.({
           access_token: o.access_token,
@@ -98,6 +130,11 @@ export function createEmbeddedAuth(options: EmbeddedAuthOptions) {
   const load = () => {
     const src = new URL(joinUrl(options.issuer, "/embedded-login"));
     src.searchParams.set("client_id", options.clientId);
+    // Bust Safari/BFCache on each mount so iframe HTML (CFG.csrf_token) matches a fresh Set-Cookie.
+    src.searchParams.set("_pv", String(Date.now()));
+    if (options.returnTo) {
+      src.searchParams.set("return_to", options.returnTo);
+    }
     iframe.src = src.toString();
   };
 

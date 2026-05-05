@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -145,9 +146,65 @@ pub async fn register_page(State(state): State<Arc<AppState>>) -> axum::response
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackBody {
-    pub access_token: String,
+    #[serde(default)]
+    pub access_token: Option<String>,
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// One-time code from iframe (`AUTH_SUCCESS`); exchanged server-side (`grant_type=embedded_session`).
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+fn basic_auth_header(user: &str, pass: &str) -> String {
+    let raw = format!("{user}:{pass}");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+    format!("Basic {b64}")
+}
+
+async fn exchange_embedded_session_code(
+    state: &AppState,
+    code: &str,
+) -> Result<(String, String), String> {
+    let token_url = format!(
+        "{}/oauth2/token",
+        state.settings.auth_api_base.trim_end_matches('/')
+    );
+    let cid = state.settings.oauth_client_id.as_str();
+    let form = [
+        ("grant_type", "embedded_session"),
+        ("code", code.trim()),
+        ("client_id", cid),
+    ];
+    let mut req = state.http.post(&token_url).form(&form);
+    if let Some(ref sec) = state.settings.oauth_client_secret {
+        if !sec.is_empty() {
+            req = req.header(
+                header::AUTHORIZATION,
+                basic_auth_header(cid, sec.as_str()),
+            );
+        }
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("token endpoint {status}: {body}"));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let access = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "missing access_token in token response".to_string())?
+        .to_string();
+    let refresh = v
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok((access, refresh))
 }
 
 pub async fn auth_callback(
@@ -159,21 +216,48 @@ pub async fn auth_callback(
         axum::http::StatusCode::BAD_REQUEST,
         Json(json!({ "error": "missing session cookie" })),
     ))?;
-    if body.access_token.is_empty() {
+
+    let (access_token, refresh_token_opt) = if let Some(ref c) = body.code {
+        if c.trim().is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "empty code" })),
+            ));
+        }
+        exchange_embedded_session_code(&state, c)
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": e })),
+                )
+            })?
+    } else if let Some(ref at) = body.access_token {
+        if at.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "missing access_token" })),
+            ));
+        }
+        (
+            at.clone(),
+            body.refresh_token.clone().unwrap_or_default(),
+        )
+    } else {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "missing access_token" })),
+            Json(json!({ "error": "missing code or access_token" })),
         ));
-    }
+    };
 
     let mut email = None::<String>;
     let mut sub = None::<String>;
-    if let Ok(v) = state.oauth.userinfo(&body.access_token).await {
+    if let Ok(v) = state.oauth.userinfo(&access_token).await {
         email = v.get("email").and_then(|x| x.as_str()).map(String::from);
         sub = v.get("sub").and_then(|x| x.as_str()).map(String::from);
     }
 
-    let refresh = body.refresh_token.unwrap_or_default();
+    let refresh = refresh_token_opt;
 
     state
         .store
@@ -182,7 +266,7 @@ pub async fn auth_callback(
             state.settings.client_label,
             email.as_deref(),
             sub.as_deref(),
-            &body.access_token,
+            &access_token,
             &refresh,
         )
         .map_err(|e| {

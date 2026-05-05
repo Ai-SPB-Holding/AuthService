@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::header::{HOST, ORIGIN, REFERER, SET_COOKIE};
+use axum::http::header::{CACHE_CONTROL, EXPIRES, HOST, ORIGIN, PRAGMA, REFERER, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use redis::AsyncCommands;
@@ -28,6 +28,9 @@ const CSRF_TTL_SECS: i64 = 1800;
 #[derive(Debug, Deserialize)]
 pub struct EmbeddedLoginQuery {
     pub client_id: String,
+    /// SPA URL to return after sign-in in a standalone tab (`#embedded_session_code=` is appended).
+    #[serde(default)]
+    pub return_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +181,29 @@ fn parent_origin_ok(site: Option<&str>, allowed: &[String], relax: bool) -> bool
         return false;
     };
     allowed.iter().any(|p| origin_allowed(site, p))
+}
+
+/// Absolute `return_to` URL for post-login redirect; origin must match embedded parent allowlist.
+fn validate_embedded_return_to_url(
+    raw: Option<&str>,
+    allowed: &[String],
+    relax: bool,
+) -> Option<String> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    let u = url::Url::parse(raw).ok()?;
+    if u.scheme() != "http" && u.scheme() != "https" {
+        return None;
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return None;
+    }
+    let site = parse_site_origin(raw)?;
+    if !parent_origin_ok(Some(site.as_str()), allowed, relax) {
+        return None;
+    }
+    let mut out = u;
+    out.set_fragment(None);
+    Some(out.into())
 }
 
 /// `fetch()` from JS inside the iframe sends `Origin: <auth service>` (the frame URL), not the parent app.
@@ -380,30 +406,95 @@ struct EmbeddedValidated {
 }
 
 async fn delete_embedded_csrf_redis(state: &Arc<AppState>, csrf_token: &str) {
-    let t = csrf_token.trim();
+    let t = normalize_embedded_csrf_value(csrf_token);
     if t.is_empty() {
         return;
     }
-    let key = csrf_redis_key(state.as_ref(), t);
+    let key = csrf_redis_key(state.as_ref(), &t);
     let mut r = state.auth.redis.clone();
     let _: Result<(), _> = r.del::<_, ()>(&key).await;
 }
 
-fn cookie_csrf_token(headers: &HeaderMap) -> Option<String> {
-    headers
+/// Normalize a CSRF token from cookie or JSON body: trim and strip RFC6265-style surrounding quotes.
+fn normalize_embedded_csrf_value(raw: &str) -> String {
+    let t = raw.trim();
+    let t = t
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(t)
+        .trim();
+    t.to_string()
+}
+
+/// Collect all `embedded_csrf` cookie values from the request.
+///
+/// Safari / ITP may send multiple cookies with the same name (stale + new) and the order can be
+/// unstable across contexts. For embedded POSTs we validate by matching the **body** `csrf_token`
+/// against any cookie value rather than picking an arbitrary "last one".
+fn cookie_csrf_tokens(headers: &HeaderMap) -> Vec<String> {
+    let raw = headers
         .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|raw| {
-            for part in raw.split(';') {
-                let p = part.trim();
-                if let Some(rest) = p.strip_prefix(CSRF_COOKIE)
-                    && let Some(v) = rest.strip_prefix('=')
-                {
-                    return Some(v.trim().to_string());
-                }
+        .and_then(|v| v.to_str().ok());
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split(';') {
+        let p = part.trim();
+        if let Some(rest) = p.strip_prefix(CSRF_COOKIE)
+            && let Some(v) = rest.strip_prefix('=')
+        {
+            let t = normalize_embedded_csrf_value(v);
+            if !t.is_empty() {
+                out.push(t);
             }
-            None
-        })
+        }
+    }
+    out
+}
+
+fn embedded_csrf_cookie_pair_headers(
+    csrf: &str,
+    secure: bool,
+    same_site: &str,
+    ttl_secs: i64,
+) -> Result<(HeaderValue, HeaderValue), AppError> {
+    let clear = format!(
+        "{CSRF_COOKIE}=; Path=/; HttpOnly; SameSite={same_site}; Max-Age=0{}",
+        if secure { "; Secure" } else { "" }
+    );
+    let set = format!(
+        "{CSRF_COOKIE}={csrf}; Path=/; HttpOnly; SameSite={same_site}; Max-Age={ttl_secs}{}",
+        if secure { "; Secure" } else { "" }
+    );
+    Ok((
+        HeaderValue::from_str(&clear).map_err(|_| AppError::Internal("invalid Set-Cookie".to_string()))?,
+        HeaderValue::from_str(&set).map_err(|_| AppError::Internal("invalid Set-Cookie".to_string()))?,
+    ))
+}
+
+fn apply_embedded_no_store_headers(res: &mut Response) {
+    res.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+    );
+    res.headers_mut().insert(PRAGMA, HeaderValue::from_static("no-cache"));
+    res.headers_mut().insert(EXPIRES, HeaderValue::from_static("0"));
+}
+
+/// `GET /api/embedded/csrf-check` — whether the browser sent `embedded_csrf` (HttpOnly; not readable from JS).
+pub async fn embedded_csrf_check(headers: HeaderMap) -> Response {
+    let mut res = if cookie_csrf_tokens(&headers).iter().any(|t| !t.trim().is_empty()) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "code": "CSRF_MISSING" })),
+        )
+            .into_response()
+    };
+    apply_embedded_no_store_headers(&mut res);
+    res
 }
 
 fn map_embedded_register_error(e: AppError) -> Response {
@@ -472,7 +563,8 @@ async fn validate_embedded_csrf_and_origin(
     check_ip_limit(state, &ip).await?;
 
     let client_id = client_id.trim();
-    if client_id.is_empty() || csrf_body.trim().is_empty() {
+    let csrf_body = normalize_embedded_csrf_value(csrf_body);
+    if client_id.is_empty() || csrf_body.is_empty() {
         return Err(json_err(
             "VALIDATION_ERROR",
             StatusCode::BAD_REQUEST,
@@ -480,7 +572,8 @@ async fn validate_embedded_csrf_and_origin(
         ));
     }
 
-    let Some(ct) = cookie_csrf_token(headers).filter(|t| !t.is_empty()) else {
+    let cookie_tokens = cookie_csrf_tokens(headers);
+    if cookie_tokens.is_empty() {
         return Err(json_err(
             "CSRF_INVALID",
             StatusCode::FORBIDDEN,
@@ -488,7 +581,12 @@ async fn validate_embedded_csrf_and_origin(
         ));
     };
 
-    if ct != csrf_body.trim() {
+    if !cookie_tokens.iter().any(|t| t == &csrf_body) {
+        tracing::debug!(
+            cookie_value_count = cookie_tokens.len(),
+            body_token_len = csrf_body.len(),
+            "embedded csrf: cookie values do not match body csrf_token"
+        );
         return Err(json_err(
             "CSRF_INVALID",
             StatusCode::FORBIDDEN,
@@ -497,7 +595,7 @@ async fn validate_embedded_csrf_and_origin(
     }
 
     let mut rconn = state.auth.redis.clone();
-    let key = csrf_redis_key(state.as_ref(), &ct);
+    let key = csrf_redis_key(state.as_ref(), &csrf_body);
     let bound: Option<String> = rconn.get(&key).await.map_err(|_| {
         json_err(
             "INTERNAL_ERROR",
@@ -664,18 +762,24 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
         .set_ex(&key, ec.client_id.as_str(), CSRF_TTL_SECS as u64)
         .await?;
 
+    // In cross-site iframes the CSRF cookie must be `SameSite=None; Secure`, otherwise browsers
+    // will not send it on XHR/POST requests from the embedded document.
+    // For local/dev over http keep `Lax` to avoid requiring HTTPS.
     let secure = state.config.embedded_csrf_cookie_secure();
-    let cookie_val = format!(
-        "{CSRF_COOKIE}={csrf}; Path=/; HttpOnly; SameSite=Lax; Max-Age={CSRF_TTL_SECS}{}",
-        if secure { "; Secure" } else { "" }
-    );
-    let cookie_h = HeaderValue::from_str(&cookie_val)
-        .map_err(|_| AppError::Internal("invalid Set-Cookie".to_string()))?;
+    let same_site = if secure { "None" } else { "Lax" };
+    let (cookie_clear_h, cookie_set_h) =
+        embedded_csrf_cookie_pair_headers(&csrf, secure, same_site, CSRF_TTL_SECS)?;
 
     let post_targets: Vec<String> = ec.parent_origins.clone();
     let target_origin = reported
         .clone()
         .or_else(|| ec.parent_origins.first().cloned());
+
+    let return_to = validate_embedded_return_to_url(
+        q.return_to.as_deref(),
+        &ec.parent_origins,
+        relax,
+    );
 
     let cfg = json!({
         "client_id": ec.client_id,
@@ -688,6 +792,7 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
         "target_origin": target_origin,
         "protocol_v2": ec.protocol_v2,
         "initial_theme": ec.ui_theme.clone().unwrap_or(serde_json::Value::Null),
+        "return_to": return_to,
     });
     let cfg_json = serde_json::to_string(&cfg).map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -730,6 +835,16 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
   </style>
 </head>
 <body>
+  <div id="cookieChecking" class="hint">Checking session…</div>
+
+  <div id="cookieGate" style="display:none">
+    <p class="hint">This browser blocked cookies for this embedded sign-in. Click below to allow cookies for this site (Safari / strict tracking prevention).</p>
+    <div id="cookieGateErr" class="err" role="alert"></div>
+    <button type="button" id="cookieGateBtn">Allow cookies</button>
+    <p class="hint" style="margin-top:0.75rem"><a id="cookieGateOpenTab" href='#' target="_blank" rel="noopener">Open sign-in in a new tab</a></p>
+  </div>
+
+  <div id="mainUi" style="display:none">
   <h1>Account</h1>
   <div id="tabs" class="tabs" style="display:none">
     <button type="button" class="tab active" id="tabLogin">Login</button>
@@ -787,6 +902,7 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
       <button type="submit">Complete registration</button>
     </form>
   </div>
+  </div>
 
   <script>
 (function() {{
@@ -839,6 +955,64 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
   }}
   function showErr(m) {{
     document.getElementById('err').textContent = m || '';
+  }}
+
+  /** Mint one-time BFF code (never send short-lived access_token to parent). */
+  async function postAuthSuccessBff(accessToken) {{
+    try {{
+      const res = await fetch('/api/session-code', {{
+        method: 'POST',
+        credentials: 'include',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          access_token: accessToken,
+          client_id: CFG.client_id,
+          csrf_token: CFG.csrf_token
+        }})
+      }});
+      const d = await res.json().catch(function() {{ return {{}}; }});
+      if (res.ok && d.code) {{
+        postOk({{
+          type: 'AUTH_SUCCESS',
+          code: d.code,
+          expires_in: d.expires_in,
+          token_type: d.token_type || 'embedded_session'
+        }});
+        if (window.opener && !window.opener.closed) {{
+          try {{
+            var om = (CFG.allowed_parent_origins && CFG.allowed_parent_origins[0]) ? String(CFG.allowed_parent_origins[0]) : '*';
+            if (CFG.return_to) {{
+              try {{ om = new URL(CFG.return_to).origin; }} catch (e0) {{}}
+            }}
+            if (CFG.protocol_v2) {{
+              window.opener.postMessage(v2Envelope('AUTH_SUCCESS', {{ code: d.code, expires_in: d.expires_in, token_type: d.token_type || 'embedded_session' }}), om);
+            }} else {{
+              window.opener.postMessage({{ type: 'AUTH_SUCCESS', code: d.code, expires_in: d.expires_in, token_type: d.token_type || 'embedded_session' }}, om);
+            }}
+          }} catch (eOp) {{}}
+        }}
+        if (CFG.return_to) {{
+          try {{
+            var ru = new URL(CFG.return_to);
+            ru.hash = 'embedded_session_code=' + encodeURIComponent(d.code);
+            window.location.replace(ru.toString());
+            setTimeout(function() {{ try {{ window.close(); }} catch (eC) {{}} }}, 400);
+          }} catch (eR) {{
+            showErr('Signed in. You can close this window.');
+          }}
+          return true;
+        }}
+        return true;
+      }}
+      const errCode = d.code || 'SESSION_CODE_FAILED';
+      postErr(errCode, d.error || String(d.code || 'session code failed'));
+      showErr(d.error || errCode);
+      return false;
+    }} catch (e) {{
+      postErr('NETWORK_ERROR', String(e));
+      showErr('Network error');
+      return false;
+    }}
   }}
 
   const tabsEl = document.getElementById('tabs');
@@ -944,8 +1118,8 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
       }});
       const data = await res.json().catch(function() {{ return {{}}; }});
       if (res.ok && data.access_token) {{
-        postOk({{ type: 'AUTH_SUCCESS', access_token: data.access_token, expires_in: data.expires_in }});
-        showErr('Signed in. You can close this window.');
+        const ok = await postAuthSuccessBff(data.access_token);
+        if (ok && !CFG.return_to && window.self === window.top && !window.frameElement) showErr('Signed in. You can close this window.');
         return;
       }}
       if (data.client_totp_enroll_email_required && data.email_verification_token) {{
@@ -989,8 +1163,8 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
       }});
       const data = await res.json().catch(function() {{ return {{}}; }});
       if (res.ok && data.access_token) {{
-        postOk({{ type: 'AUTH_SUCCESS', access_token: data.access_token, expires_in: data.expires_in }});
-        showErr('Signed in.');
+        const ok = await postAuthSuccessBff(data.access_token);
+        if (ok && !CFG.return_to && window.self === window.top && !window.frameElement) showErr('Signed in.');
         return;
       }}
       postErr(data.code || 'MFA_FAILED', data.error || '');
@@ -1145,8 +1319,8 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
         return;
       }}
       if (res.ok && data.access_token) {{
-        postOk({{ type: 'AUTH_SUCCESS', access_token: data.access_token, expires_in: data.expires_in }});
-        showErr('Account verified. You are signed in.');
+        const ok = await postAuthSuccessBff(data.access_token);
+        if (ok && !CFG.return_to && window.self === window.top && !window.frameElement) showErr('Account verified. You are signed in.');
         return;
       }}
       const code = data.code || 'VERIFY_FAILED';
@@ -1182,10 +1356,14 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
       }});
       const data = await res.json().catch(function() {{ return {{}}; }});
       if (res.ok && data.access_token) {{
-        postOk({{ type: 'AUTH_SUCCESS', access_token: data.access_token, expires_in: data.expires_in }});
-        showErr(isLoginCte ? 'Signed in.' : 'Registered and signed in.');
-        regEnrollToken = null;
-        isLoginCte = false;
+        const ok = await postAuthSuccessBff(data.access_token);
+        if (ok) {{
+          if (!CFG.return_to && window.self === window.top && !window.frameElement) {{
+            showErr(isLoginCte ? 'Signed in.' : 'Registered and signed in.');
+          }}
+          regEnrollToken = null;
+          isLoginCte = false;
+        }}
         return;
       }}
       const code = data.code || 'CLIENT_TOTP_VERIFY_FAILED';
@@ -1280,6 +1458,14 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
     mergedTheme = mergeTheme(mergedTheme, CFG.initial_theme);
     applyTheme(mergedTheme);
   }}
+
+  var embedReadySent = false;
+  function emitEmbedReadyOnce() {{
+    if (!CFG.protocol_v2 || embedReadySent) return;
+    embedReadySent = true;
+    sendToParent(v2Envelope('EMBED_READY', {{}}));
+  }}
+
   if (CFG.protocol_v2) {{
     window.addEventListener('message', function(ev) {{
       if (ev.source !== window.parent) return;
@@ -1302,8 +1488,73 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
         sendToParent(v2Envelope('SESSION_ENDED', {{ reason: 'logout' }}));
       }}
     }});
-    sendToParent(v2Envelope('EMBED_READY', {{}}));
   }}
+
+  async function runCsrfProbe() {{
+    try {{
+      var res = await fetch('/api/embedded/csrf-check', {{ credentials: 'include', cache: 'no-store' }});
+      return res.status === 204;
+    }} catch (e) {{
+      return false;
+    }}
+  }}
+
+  function showMainUi() {{
+    document.getElementById('cookieChecking').style.display = 'none';
+    document.getElementById('cookieGate').style.display = 'none';
+    document.getElementById('mainUi').style.display = '';
+    emitEmbedReadyOnce();
+  }}
+
+  async function bootEmbedded() {{
+    var checkingEl = document.getElementById('cookieChecking');
+    var gateEl = document.getElementById('cookieGate');
+    var gateErr = document.getElementById('cookieGateErr');
+    document.getElementById('cookieGateOpenTab').href = window.location.href;
+
+    var ok = await runCsrfProbe();
+    if (ok) {{
+      showMainUi();
+      return;
+    }}
+    checkingEl.style.display = 'none';
+    gateEl.style.display = 'block';
+    gateErr.textContent = '';
+  }}
+
+  document.getElementById('cookieGateBtn').addEventListener('click', async function() {{
+    var gateErr = document.getElementById('cookieGateErr');
+    gateErr.textContent = '';
+    try {{
+      if (document.requestStorageAccess) {{
+        await document.requestStorageAccess();
+      }}
+    }} catch (e) {{
+      gateErr.textContent = (e && e.message) ? e.message : String(e);
+    }}
+    var ok = await runCsrfProbe();
+    if (ok) {{
+      try {{
+        var u = new URL(window.location.href);
+        u.searchParams.set('_emb', String(Date.now()));
+        window.location.replace(u.toString());
+        return;
+      }} catch (e) {{
+        showMainUi();
+      }}
+    }} else {{
+      try {{
+        if (!sessionStorage.getItem('emb_csrf_reload_once')) {{
+          sessionStorage.setItem('emb_csrf_reload_once', '1');
+          window.location.reload();
+          return;
+        }}
+      }} catch (e) {{}}
+      gateErr.textContent = 'Cookies are still blocked in this frame. Use “Open sign-in in a new tab” below or allow cross-site cookies for this site.';
+    }}
+  }});
+
+  bootEmbedded();
 }})();
   </script>
 </body>
@@ -1325,7 +1576,9 @@ Add your demo app’s exact origin(s) under OAuth client <strong>Parent origins<
             "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
         ),
     );
-    res.headers_mut().insert(SET_COOKIE, cookie_h);
+    res.headers_mut().append(SET_COOKIE, cookie_clear_h);
+    res.headers_mut().append(SET_COOKIE, cookie_set_h);
+    apply_embedded_no_store_headers(&mut res);
     Ok(res)
 }
 
@@ -1422,9 +1675,8 @@ pub async fn embedded_login_api(
         ),
     };
 
-    if resp.1 {
-        delete_embedded_csrf_redis(&state, &body.csrf_token).await;
-    }
+    // Do not delete CSRF here: the iframe calls `POST /api/session-code` next (BFF one-time code),
+    // which re-validates the same CSRF+cookie. CSRF is consumed in `embedded_session_code_api`.
     Ok(resp.0)
 }
 
@@ -1452,6 +1704,7 @@ pub async fn embedded_session_code_api(
         .auth
         .create_embedded_exchange_code(body.access_token.trim(), body.client_id.trim())
         .await?;
+    delete_embedded_csrf_redis(&state, &body.csrf_token).await;
     Ok(Json(json!({
         "code": code,
         "expires_in": exp,
@@ -1564,7 +1817,7 @@ fn map_verify_complete_error(e: AppError) -> Response {
     }
 }
 
-/// `POST /api/register/verify-email` — existing user: tokens + consume CSRF; pending required-MFA: enrollment JWT (keeps CSRF).
+/// `POST /api/register/verify-email` — existing user: tokens (CSRF consumed later on `POST /api/session-code`); pending required-MFA: enrollment JWT (keeps CSRF).
 pub async fn embedded_register_verify_email(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1720,8 +1973,6 @@ pub async fn embedded_register_verify_email(
         Ok(p) => p,
         Err(e) => return Ok(map_verify_complete_error(e)),
     };
-
-    delete_embedded_csrf_redis(&state, &body.csrf_token).await;
 
     let v = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(v).into_response())
@@ -2066,8 +2317,6 @@ pub async fn embedded_register_client_totp_verify(
         Err(e) => return Ok(map_embedded_register_error(e)),
     };
 
-    delete_embedded_csrf_redis(&state, &body.csrf_token).await;
-
     let v = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(v).into_response())
 }
@@ -2347,8 +2596,6 @@ pub async fn embedded_login_client_totp_enroll_verify(
             });
         }
     };
-
-    delete_embedded_csrf_redis(&state, &body.csrf_token).await;
 
     let v = serde_json::to_value(&pair).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(v).into_response())
